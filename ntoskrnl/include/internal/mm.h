@@ -766,6 +766,25 @@ MmInitializeProcessAddressSpace(
 );
 
 /*
+ * Copies BufferSize bytes from SourceAddress in SourceProcess to
+ * TargetAddress in TargetProcess, via a temporary MDL mapping -- defined in
+ * virtual.c (already used there by NtReadVirtualMemory/NtWriteVirtualMemory)
+ * with external linkage but, until now, no header declaration anywhere,
+ * which is why MmCloneAddressSpace below has to declare it itself.
+ */
+NTSTATUS
+NTAPI
+MiDoMappedCopy(
+    IN PEPROCESS SourceProcess,
+    IN PVOID SourceAddress,
+    IN PEPROCESS TargetProcess,
+    OUT PVOID TargetAddress,
+    IN SIZE_T BufferSize,
+    IN KPROCESSOR_MODE PreviousMode,
+    OUT PSIZE_T ReturnSize
+);
+
+/*
  * Duplicates every inheritable VAD of Parent into Process, eagerly copying
  * the backing pages across (see the big comment on the definition in
  * procsup.c for why this is an eager copy rather than wiring the new VADs

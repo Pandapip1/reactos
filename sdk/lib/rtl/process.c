@@ -508,10 +508,11 @@ RtlCloneUserProcess(IN ULONG ProcessFlags,
      * Note ProcessInformation in the child is stale/zeroed, not populated:
      * PspCreateProcess (ntoskrnl/ps/process.c) calls MmCloneAddressSpace()
      * -- which is what snapshots the child's memory, stack included --
-     * well before it captures the calling thread's context and writes
-     * *CloneThreadHandle/*CloneThreadClientId back to this ProcessInformation
-     * (verified from that file's line ordering: the clone-address-space
-     * call happens during process-object creation, the context-capture/
+     * well before it captures the calling thread's context and writes the
+     * CloneThreadHandle/CloneThreadClientId out-parameters back to this
+     * ProcessInformation (verified from that file's line ordering: the
+     * clone-address-space call happens during process-object creation, the
+     * context-capture/
      * write-back only once IsClone && a real thread exists, much later in
      * the same function). So the child's stack already had ProcessInformation
      * zeroed (by RtlZeroMemory above, which also ran before the syscall)
