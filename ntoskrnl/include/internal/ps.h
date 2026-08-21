@@ -180,22 +180,23 @@ PspCreateProcess(
 );
 
 /*
- * Kernel-mode-only entry point for the legacy fork()-emulation ("clone")
- * path of process creation -- the ONE call that clones both the calling
+ * Kernel-mode entry point for the legacy fork()-emulation ("clone") path
+ * of process creation -- the ONE call that clones both the calling
  * process's address space (via PspCreateProcess's SectionHandle-less/
  * Parent-given branch, see the FIXME history in ntoskrnl/ps/process.c) and
  * the calling thread itself (a new initial thread whose context is a copy
  * of the caller's own, patched to return STATUS_PROCESS_CLONED instead of
  * falling through).
  *
- * NOTE: nothing in ntdll/the Zw* syscall table calls this yet. Exposing it
- * to user mode (for RtlCloneUserProcess(), sdk/lib/rtl/process.c) would
- * need a new syscall -- a new ntdll.spec entry wired through to a matching
- * kernel-mode handler and given a real service number -- which this change
- * does not add: the syscall-number assignment/registration machinery was
- * not traced or verified here, and guessing at it risked corrupting the
- * entire service table for every *other* syscall too. Until that wiring
- * exists, this is only callable by other kernel-mode code.
+ * Exposed to user mode via NtCreateProcessClone()/ZwCreateProcessClone()
+ * (ntoskrnl/ps/process.c, right after NtCreateProcessEx) -- a genuinely
+ * new, ReactOS-specific syscall (see the SVC_(CreateProcessClone, 7) entry
+ * appended to ntoskrnl/include/sysfuncs.h, which both ntoskrnl's MainSSDT
+ * -- ntoskrnl/include/internal/napi.h -- and ntdll's generated stub --
+ * ntoskrnl/ntdll.S plus sdk/include/asm/syscalls.inc's SyscallId counter --
+ * are built from, so its service number is assigned consistently on both
+ * sides by construction instead of being hand-picked). RtlCloneUserProcess()
+ * (sdk/lib/rtl/process.c) is the only current caller.
  */
 NTSTATUS
 NTAPI

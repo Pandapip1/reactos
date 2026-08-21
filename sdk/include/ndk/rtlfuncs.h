@@ -2756,15 +2756,17 @@ RtlCreateUserProcess(
 // cloning the calling thread's own trap context into the child's initial
 // thread -- is implemented; see PspCreateProcess's "This is a clone!"
 // branch and PsCreateCloneProcess() in ntoskrnl/ps/process.c, and
-// MmCloneAddressSpace() in ntoskrnl/mm/ARM3/procsup.c. What's NOT done yet
-// is exposing PsCreateCloneProcess() to user mode: that needs a new
-// syscall (a new ntdll.spec entry plus a registered service number), which
-// was not added here -- see the comment on PsCreateCloneProcess's
-// prototype in ntoskrnl/include/internal/ps.h for why. Until that syscall
-// exists, RtlCloneUserProcess() below can drive the (now-working)
-// address-space/PEB clone via the ordinary ZwCreateProcess() syscall, but
-// has no way to ask the kernel for the matching cloned thread, and so
-// still fails after that point -- see sdk/lib/rtl/process.c.
+// MmCloneAddressSpace() in ntoskrnl/mm/ARM3/procsup.c. That is now also
+// reachable from here: NtCreateProcessClone()/ZwCreateProcessClone()
+// (ntoskrnl/ps/process.c) are a new, ReactOS-specific syscall (not part of
+// real NT) wrapping PsCreateCloneProcess(), given a real, consistently
+// -assigned service number via the shared ntoskrnl/include/sysfuncs.h
+// table -- see the comment on PsCreateCloneProcess's prototype in
+// ntoskrnl/include/internal/ps.h for the mechanism. RtlCloneUserProcess()
+// (sdk/lib/rtl/process.c) drives that syscall directly, so both halves of
+// the parent/child contract above are real: NOT built or tested (no
+// mingw-w64 C++ cross-compiler/ninja/RosBE in this environment, and a real
+// test needs a booted VM), but no longer missing a code path.
 //
 NTSYSAPI
 NTSTATUS

@@ -402,6 +402,27 @@ NtCreateProcessEx(
     _In_ BOOLEAN InJob
 );
 
+//
+// ReactOS-specific: not part of real NT. Userspace entry point for the
+// fork()-emulation ("clone") path -- see PsCreateCloneProcess()
+// (ntoskrnl/ps/process.c, which this wraps) and RtlCloneUserProcess()
+// (sdk/lib/rtl/process.c, the only caller). Unlike NtCreateProcess/
+// NtCreateProcessEx above, ParentProcess is mandatory: there is no
+// "create a fresh System process" meaning for a clone request.
+//
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtCreateProcessClone(
+    _Out_ PHANDLE ProcessHandle,
+    _Out_ PHANDLE ThreadHandle,
+    _Out_ PCLIENT_ID ThreadClientId,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ HANDLE ParentProcess,
+    _In_opt_ HANDLE DebugPort
+);
+
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
@@ -682,6 +703,20 @@ ZwCreateProcess(
     _In_opt_ HANDLE SectionHandle,
     _In_opt_ HANDLE DebugPort,
     _In_opt_ HANDLE ExceptionPort
+);
+
+// ReactOS-specific: see NtCreateProcessClone() above.
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwCreateProcessClone(
+    _Out_ PHANDLE ProcessHandle,
+    _Out_ PHANDLE ThreadHandle,
+    _Out_ PCLIENT_ID ThreadClientId,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ HANDLE ParentProcess,
+    _In_opt_ HANDLE DebugPort
 );
 
 NTSYSAPI

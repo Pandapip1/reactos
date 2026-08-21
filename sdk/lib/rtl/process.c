@@ -388,7 +388,7 @@ RtlCreateUserProcess(IN PUNICODE_STRING ImageFileName,
 }
 
 /*
- * @unimplemented
+ * @implemented
  *
  * Duplicates ("clones", cf. POSIX fork()) the calling process into a new
  * process, whose single initial thread starts suspended and is itself a
@@ -398,34 +398,32 @@ RtlCreateUserProcess(IN PUNICODE_STRING ImageFileName,
  * ARCHITECTURE:
  *
  * Unlike RtlCreateUserProcess() above, this does not map a new image: it
- * asks ZwCreateProcess() to clone the CALLING process's own address space
- * by passing SectionHandle = NULL together with a Parent (ourselves). That
- * is not a new code path -- it is the exact legacy fork()-emulation trick
- * real pre-Vista NT exposed via NtCreateProcess() (used by e.g. Interix and
- * Cygwin's fork()), and ReactOS's PspCreateProcess() (ntoskrnl/ps/process.c)
- * now actually implements this case ("no section handle, but a parent
- * process given" => "This is a clone!"): it duplicates Parent's inheritable
- * VADs (heap, stacks, and -- since the PEB's own VAD is PrivateMemory --
- * the PEB too) into the child via MmCloneAddressSpace()
- * (ntoskrnl/mm/ARM3/procsup.c).
+ * asks ZwCreateProcessClone() to clone the CALLING process's own address
+ * space AND, in the same call, the calling thread's own trap context into
+ * the child's initial thread. ZwCreateProcessClone() is a genuinely new,
+ * ReactOS-specific syscall (not present in real NT) that wraps
+ * PsCreateCloneProcess() (ntoskrnl/ps/process.c); see the comment on that
+ * function's prototype in ntoskrnl/include/internal/ps.h for exactly how
+ * its service number is assigned (via the shared ntoskrnl/include/sysfuncs.h
+ * table, so ntoskrnl's MainSSDT and ntdll's generated stub always agree by
+ * construction). Under the hood it is still the same legacy fork()-emulation
+ * trick real pre-Vista NT exposed via NtCreateProcess() (used by e.g.
+ * Interix and Cygwin's fork()): SectionHandle = NULL together with a Parent
+ * (ourselves) is what PspCreateProcess recognizes as "this is a clone!" and
+ * answers by duplicating Parent's inheritable VADs (heap, stacks, and --
+ * since the PEB's own VAD is PrivateMemory -- the PEB too) into the child
+ * via MmCloneAddressSpace() (ntoskrnl/mm/ARM3/procsup.c).
  *
- * What PspCreateProcess's clone branch does NOT do when reached through the
- * plain ZwCreateProcess() syscall below is create the child's initial
- * thread. That capability exists in the kernel -- PspCreateProcess can
- * also clone the CALLING thread's own trap context (via the existing
- * PsGetContextThread(), patched to return STATUS_PROCESS_CLONED, so the
- * child resumes exactly where this call was made, exactly like fork()'s
- * "one call returns twice") into the new thread, in the SAME call that
- * clones the address space -- but it is reachable only through a new,
- * kernel-mode-only entry point, PsCreateCloneProcess() (declared next to
- * PspCreateProcess in ntoskrnl/include/internal/ps.h), because the plain
- * NtCreateProcess()/ZwCreateProcess() syscall's parameter list is real NT
- * ABI and has no room for the extra ThreadHandle/ClientId this needs.
- * Exposing PsCreateCloneProcess() here would need a genuinely new syscall
- * (a new ntdll.spec entry plus a registered service number); that plumbing
- * was not added, because getting a made-up service number wrong risks
- * corrupting the entire syscall table for every *other* function, and the
- * actual number-assignment mechanism was not traced/verified.
+ * Why a whole new syscall instead of reusing plain NtCreateProcess()/
+ * NtCreateProcessEx(): those two are real NT ABI (their parameter lists are
+ * fixed by every existing caller, in this codebase and in real Windows
+ * binaries), and have no room for the extra ThreadHandle/ClientId output
+ * that PspCreateProcess's clone branch can produce in the very same call
+ * (a new initial thread whose context is a copy of the caller's own,
+ * patched to return STATUS_PROCESS_CLONED). PsCreateCloneProcess() is that
+ * third parameter list, and NtCreateProcessClone()/ZwCreateProcessClone()
+ * (ntoskrnl/ps/process.c, right after NtCreateProcessEx) are its syscall
+ * wrapper.
  *
  * (An easier-looking alternative -- capture our own context with
  * NtGetContextThread(NtCurrentThread(), ...) right here, patch it by hand,
@@ -440,10 +438,13 @@ RtlCreateUserProcess(IN PUNICODE_STRING ImageFileName,
  * its EIP/ESP by hand to jump back out to that caller is exactly the
  * fragile, compiler-dependent trick this design avoids.)
  *
- * So: this drives the (now real) address-space/PEB clone via the ordinary
- * syscall, then -- for lack of the syscall above -- cannot ask the kernel
- * for the matching thread, and fails cleanly rather than leave a
- * process with a real address space but no thread dangling.
+ * NOTE: ThreadSecurityDescriptor is accepted (matching the real prototype)
+ * but still has no effect: PspCreateProcess's clone branch creates the
+ * child's initial thread with NULL ObjectAttributes (see the
+ * PspCreateThread() call in its "This is a clone!" branch), and
+ * PsCreateCloneProcess()'s parameter list has no room to plumb a thread SD
+ * through to it either. That is a preexisting gap this change does not
+ * close, distinct from the syscall-wiring gap it does close.
  */
 NTSTATUS
 NTAPI
@@ -455,10 +456,6 @@ RtlCloneUserProcess(IN ULONG ProcessFlags,
 {
     NTSTATUS Status;
     OBJECT_ATTRIBUTES ObjectAttributes;
-    DPRINT1("RtlCloneUserProcess: address-space/PEB clone is implemented, but "
-            "the matching thread clone needs PsCreateCloneProcess(), which "
-            "is not yet reachable from user mode -- see the comment above "
-            "this function\n");
 
     if (!ProcessInformation ||
         ProcessInformation->Size < sizeof(RTL_USER_PROCESS_INFORMATION))
@@ -478,39 +475,52 @@ RtlCloneUserProcess(IN ULONG ProcessFlags,
     /*
      * SectionHandle = NULL + ParentProcess = ourselves is what tells
      * PspCreateProcess this is a clone rather than a new-image process; see
-     * the comment above. InheritObjectTable = TRUE mirrors POSIX fork()'s
-     * "child inherits the parent's whole descriptor/handle table" semantics.
-     *
-     * This now really does clone our address space and PEB into the new
-     * process (PspCreateProcess's clone branch is implemented), so
-     * ProcessInformation->ProcessHandle, on success, is a real, usable
-     * (if thread-less) process.
+     * the comment above. This one call clones our address space and PEB
+     * (real, usable memory -- PspCreateProcess's clone branch is
+     * implemented) AND the calling thread's own trap context into the
+     * child's initial thread, patched to return STATUS_PROCESS_CLONED, so
+     * ProcessInformation is filled in with a genuinely usable clone: the
+     * child, once ProcessInformation->ThreadHandle is resumed, returns from
+     * THIS SAME RtlCloneUserProcess() call with STATUS_PROCESS_CLONED
+     * instead of falling through here.
      */
-    Status = ZwCreateProcess(&ProcessInformation->ProcessHandle,
-                             PROCESS_ALL_ACCESS,
-                             &ObjectAttributes,
-                             NtCurrentProcess(),
-                             TRUE,
-                             NULL,
-                             DebugPort,
-                             NULL);
+    Status = ZwCreateProcessClone(&ProcessInformation->ProcessHandle,
+                                  &ProcessInformation->ThreadHandle,
+                                  &ProcessInformation->ClientId,
+                                  PROCESS_ALL_ACCESS,
+                                  &ObjectAttributes,
+                                  NtCurrentProcess(),
+                                  DebugPort);
     if (!NT_SUCCESS(Status))
     {
-        /* A real failure now (bad quota, out of memory, ...), not the
-         * guaranteed STATUS_NOT_IMPLEMENTED this used to be */
+        /* A real failure (bad quota, out of memory, ...) */
         return Status;
     }
 
     /*
-     * We have a genuinely cloned process (real address space, real PEB),
-     * but no portable way to give it a correctly-resuming initial thread
-     * from user mode yet -- see the ARCHITECTURE comment above. Rather
-     * than create a thread that would start somewhere meaningless, fail
-     * explicitly.
+     * STATUS_PROCESS_CLONED (0x00000129) is an NT_SUCCESS() code, so a
+     * child resuming here falls through to this same "return Status"
+     * instead of the early-return above -- which IS the point: this
+     * function's contract (see <ndk/rtlfuncs.h>) is that the child's copy
+     * of this very call returns STATUS_PROCESS_CLONED here, not that it
+     * takes some other path.
+     *
+     * Note ProcessInformation in the child is stale/zeroed, not populated:
+     * PspCreateProcess (ntoskrnl/ps/process.c) calls MmCloneAddressSpace()
+     * -- which is what snapshots the child's memory, stack included --
+     * well before it captures the calling thread's context and writes
+     * *CloneThreadHandle/*CloneThreadClientId back to this ProcessInformation
+     * (verified from that file's line ordering: the clone-address-space
+     * call happens during process-object creation, the context-capture/
+     * write-back only once IsClone && a real thread exists, much later in
+     * the same function). So the child's stack already had ProcessInformation
+     * zeroed (by RtlZeroMemory above, which also ran before the syscall)
+     * at the moment its memory was snapshotted, and the later write-back
+     * only ever lands in the PARENT's live memory. This matches the
+     * documented contract, though: like fork(), only the parent is meant
+     * to read ProcessInformation's handles; the child has no use for them.
      */
-    ZwClose(ProcessInformation->ProcessHandle);
-    ProcessInformation->ProcessHandle = NULL;
-    return STATUS_NOT_IMPLEMENTED;
+    return Status;
 }
 
 /*

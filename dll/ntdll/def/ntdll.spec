@@ -285,6 +285,7 @@
 @ stdcall NtCreatePort(ptr ptr long long ptr)
 @ stdcall -stub -version=0x600+ NtCreatePrivateNamespace(ptr long ptr ptr)
 @ stdcall NtCreateProcess(ptr long ptr ptr long ptr ptr ptr)
+@ stdcall NtCreateProcessClone(ptr ptr ptr long ptr ptr ptr) ; ReactOS-specific: see PsCreateCloneProcess()/RtlCloneUserProcess()
 @ stdcall NtCreateProcessEx(ptr long ptr ptr long ptr ptr ptr long)
 @ stdcall NtCreateProfile(ptr ptr ptr long long ptr long long long) ; CHECKME
 @ stdcall -stub -version=0x600+ NtCreateResourceManager(ptr long ptr ptr ptr long wstr)
@@ -1456,6 +1457,7 @@
 @ stdcall ZwCreatePagingFile(ptr ptr ptr long)
 @ stdcall ZwCreatePort(ptr ptr long long long)
 @ stdcall ZwCreateProcess(ptr long ptr ptr long ptr ptr ptr)
+@ stdcall ZwCreateProcessClone(ptr ptr ptr long ptr ptr ptr) ; ReactOS-specific: see PsCreateCloneProcess()/RtlCloneUserProcess()
 @ stdcall ZwCreateProcessEx(ptr long ptr ptr long ptr ptr ptr long)
 @ stdcall ZwCreateProfile(ptr ptr ptr long long ptr long long long) ; CHECKME
 @ stdcall -stub -version=0x600+ ZwCreateResourceManager(ptr long ptr ptr ptr long wstr)

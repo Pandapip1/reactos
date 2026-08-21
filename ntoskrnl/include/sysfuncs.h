@@ -295,6 +295,14 @@
     SVC_(QueryPortInformationProcess, 0)
     SVC_(GetCurrentProcessorNumber, 0)
     SVC_(WaitForMultipleObjects32, 5)
+    /* ReactOS-specific: not part of real NT's syscall table (there is no
+     * real-Windows-compatible number to preserve here -- see
+     * PsCreateCloneProcess() in ntoskrnl/ps/process.c and the comment on
+     * RtlCloneUserProcess() in sdk/lib/rtl/process.c for why this exists).
+     * Appended at the end, like CreateKeyedEvent and friends just above,
+     * rather than inserted alphabetically, so it gets the next free
+     * SyscallId instead of renumbering every entry after it. */
+    SVC_(CreateProcessClone, 7)
 #endif // SYSFUNCS_NT6_ONLY
 
 #ifndef SYSFUNCS_NT5_ONLY

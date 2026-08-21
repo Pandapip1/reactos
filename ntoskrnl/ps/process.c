@@ -1617,6 +1617,66 @@ NtCreateProcessEx(OUT PHANDLE ProcessHandle,
 }
 
 /*
+ * @implemented (ReactOS-specific: not part of real NT)
+ *
+ * Userspace-reachable wrapper around PsCreateCloneProcess() -- the syscall
+ * RtlCloneUserProcess() (sdk/lib/rtl/process.c) drives. Unlike
+ * NtCreateProcess/NtCreateProcessEx above, ParentProcess is mandatory:
+ * there is no "no parent" meaning for a clone request (PspCreateProcess's
+ * clone branch is only reached when SectionHandle is NULL AND a real
+ * ParentProcess is given -- see its own comment), so this rejects a NULL
+ * ParentProcess up front rather than silently doing something else.
+ *
+ * The probing below mirrors NtCreateThread()'s (ntoskrnl/ps/thread.c) for
+ * ThreadHandle/ClientId, since PspCreateProcess writes *CloneThreadHandle
+ * and *CloneThreadClientId directly with no SEH of its own -- exactly like
+ * it already does for a kernel-mode-safe ProcessHandle.
+ */
+NTSTATUS
+NTAPI
+NtCreateProcessClone(OUT PHANDLE ProcessHandle,
+                     OUT PHANDLE ThreadHandle,
+                     OUT PCLIENT_ID ThreadClientId,
+                     IN ACCESS_MASK DesiredAccess,
+                     IN POBJECT_ATTRIBUTES ObjectAttributes OPTIONAL,
+                     IN HANDLE ParentProcess,
+                     IN HANDLE DebugPort OPTIONAL)
+{
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    PAGED_CODE();
+
+    /* A clone always needs a real parent to clone from */
+    if (!ParentProcess) return STATUS_INVALID_PARAMETER;
+
+    /* Check if we came from user mode */
+    if (PreviousMode != KernelMode)
+    {
+        _SEH2_TRY
+        {
+            /* Probe the two handle outputs and the client id output */
+            ProbeForWriteHandle(ProcessHandle);
+            ProbeForWriteHandle(ThreadHandle);
+            ProbeForWrite(ThreadClientId, sizeof(CLIENT_ID), sizeof(ULONG));
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            /* Return the exception code */
+            _SEH2_YIELD(return _SEH2_GetExceptionCode());
+        }
+        _SEH2_END;
+    }
+
+    /* Hand off to the shared clone entry point */
+    return PsCreateCloneProcess(ProcessHandle,
+                                ThreadHandle,
+                                ThreadClientId,
+                                DesiredAccess,
+                                ObjectAttributes,
+                                ParentProcess,
+                                DebugPort);
+}
+
+/*
  * @implemented
  */
 NTSTATUS
