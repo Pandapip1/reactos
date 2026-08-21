@@ -352,7 +352,9 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
                  IN HANDLE SectionHandle OPTIONAL,
                  IN HANDLE DebugPort OPTIONAL,
                  IN HANDLE ExceptionPort OPTIONAL,
-                 IN BOOLEAN InJob)
+                 IN BOOLEAN InJob,
+                 OUT PHANDLE CloneThreadHandle OPTIONAL,
+                 OUT PCLIENT_ID CloneThreadClientId OPTIONAL)
 {
     HANDLE hProcess;
     PEPROCESS Process, Parent;
@@ -375,6 +377,7 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
     PSECURITY_DESCRIPTOR SecurityDescriptor;
     SECURITY_SUBJECT_CONTEXT SubjectContext;
     BOOLEAN NeedsPeb = FALSE;
+    BOOLEAN IsClone = FALSE;
     INITIAL_PEB InitialPeb;
     PAGED_CODE();
     PSTRACE(PS_PROCESS_DEBUG,
@@ -658,38 +661,59 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
              * what ntdll's RtlCloneUserProcess() (sdk/lib/rtl/process.c)
              * drives.
              *
-             * FIXME: Cloning is not implemented. What's missing here is a
-             * genuine duplication of Parent's entire address space (walk
-             * Parent->VadRoot -- an AVL tree of MMVAD, see
-             * ntoskrnl/mm/ARM3/vadnode.c's MiInsertVad()/MiGetNextNode() for
-             * the existing walk/insert primitives -- and for every VAD
-             * marked Inherit (MMVAD_FLAGS.Inherit, MMVAD_FLAGS.PrivateMemory
-             * already exist as struct fields, see mmtypes.h, so this was
-             * anticipated but never wired up) create an equivalent VAD in
-             * Process and duplicate its backing pages into Process's page
-             * tables). A first cut need not implement true lazy
-             * copy-on-write sharing (ARM3 already understands COW PTEs --
-             * see MI_IS_PAGE_COPY_ON_WRITE() throughout
-             * ntoskrnl/mm/ARM3/pagfault.c -- but wiring a *new* process into
-             * that machinery at creation time, rather than at a later page
-             * fault, is unverified territory); an eager, page-by-page copy
-             * using the existing cross-process copy routine MiDoMappedCopy()
-             * (ntoskrnl/mm/ARM3/virtual.c, already used by
-             * NtReadVirtualMemory/NtWriteVirtualMemory) would give correct
-             * fork() *semantics* (the child's mutations must never reach the
-             * parent) without needing new PFN-refcounting/COW-PTE code.
-             *
-             * Previously this was only an ASSERTMSG(), which compiles to a
-             * no-op in a free/non-debug build (see ASSERTMSG's definition in
-             * ndk/rtlfuncs.h and reactos/debug.h) -- meaning a release
-             * ReactOS silently fell through with NeedsPeb left TRUE but no
-             * address space content and (see below) no PEB either, handing
-             * the caller a process object that looks created but is not
-             * usable. Fail the request cleanly instead until this is
-             * actually implemented.
+             * Give Process the address-space bookkeeping every other branch
+             * gets from MmInitializeProcessAddressSpace() (AddressCreationLock,
+             * an initialized (empty) VadRoot, and the rest of the PFNs for
+             * its own page directory/hyperspace/working-set-list pages) --
+             * this branch used to be the ONE place a Parent-having process
+             * skipped that call entirely. ProcessClone (its second
+             * parameter) has never actually been read by the function body
+             * (grep it: dead plumbing left over from some earlier, never
+             * finished, attempt at this same feature) but we still pass
+             * Parent through it, both as documentation and in case a later
+             * change gives it real meaning.
              */
-            Status = STATUS_NOT_IMPLEMENTED;
-            goto CleanupWithRef;
+            IsClone = TRUE;
+            Status = MmInitializeProcessAddressSpace(Process,
+                                                     Parent,
+                                                     NULL,
+                                                     &Flags,
+                                                     NULL);
+            if (!NT_SUCCESS(Status)) goto CleanupWithRef;
+
+            /*
+             * Now actually duplicate Parent's address space into Process.
+             * See the large comment on MmCloneAddressSpace()
+             * (ntoskrnl/mm/ARM3/procsup.c) for the full rationale; in short,
+             * it walks Parent->VadRoot (an AVL tree of MMVAD, see
+             * ntoskrnl/mm/ARM3/vadnode.c's MiInsertVad()/MiGetNextNode() for
+             * the existing walk/insert primitives) and for every VAD that
+             * should follow a fork() -- ordinary private memory (heap,
+             * stacks, and anything else VirtualAlloc'd, which is also what
+             * the parent's own PEB turns out to be, see the "We have to
+             * clone it" comment further down) or a section view explicitly
+             * marked VadFlags2.Inherit -- creates an equivalent, private,
+             * demand-zero VAD in Process at the same address and eagerly
+             * copies the current page contents across via the existing
+             * cross-process copy routine MiDoMappedCopy() (already used by
+             * NtReadVirtualMemory/NtWriteVirtualMemory). That gives correct
+             * fork() *semantics* (the child's later mutations can never
+             * reach the parent) without wiring a brand new process into
+             * ARM3's lazy COW-PTE machinery (MI_IS_PAGE_COPY_ON_WRITE(),
+             * ntoskrnl/mm/ARM3/pagfault.c) at creation time, which would be
+             * more memory-efficient but is unverified territory this change
+             * deliberately avoids.
+             *
+             * Previously this whole branch was only an ASSERTMSG(), which
+             * compiles to a no-op in a free/non-debug build (see
+             * ASSERTMSG's definition in ndk/rtlfuncs.h and reactos/debug.h)
+             * -- meaning a release ReactOS silently fell through with
+             * NeedsPeb left TRUE but no address space content and (see
+             * below) no PEB either, handing the caller a process object
+             * that looks created but is not usable.
+             */
+            Status = MmCloneAddressSpace(Parent, Process);
+            if (!NT_SUCCESS(Status)) goto CleanupWithRef;
         }
         else
         {
@@ -781,29 +805,25 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
             // We have to clone it
             //
             /*
-             * FIXME: Cloning the PEB is not implemented. Real Windows/a
-             * finished ReactOS would duplicate Parent's PEB contents (most
-             * of it, e.g. NLS table pointers and OS version fields, is
-             * process-invariant and could just be recomputed the way
-             * MmCreatePeb() above already does for a fresh PEB; the parts
-             * that matter -- ProcessParameters, the heap list, TLS bitmap,
-             * etc. -- are exactly the private/inherited memory this
-             * function's other FIXME (a few dozen lines up, in the
-             * SectionHandle-less branch) is about, so a correct
-             * implementation of that address-space clone would likely make
-             * this PEB page just another inherited VAD rather than a
-             * separately-constructed object).
+             * This falls out for free: MmCloneAddressSpace() (called above,
+             * in the SectionHandle-less branch) already walked Parent's
+             * VadRoot and duplicated every PrivateMemory VAD -- eagerly
+             * copying its actual page contents -- into Process at the SAME
+             * virtual address. MiCreatePebOrTeb() marks a PEB's VAD
+             * PrivateMemory (see ntoskrnl/mm/ARM3/procsup.c), so Parent's
+             * PEB was just another inherited VAD to that walk: Process
+             * already has a private copy of Parent's PEB contents sitting
+             * at Parent->Peb's address, we just need to point Process->Peb
+             * at it instead of building a fresh one with MmCreatePeb().
              *
-             * As above, this used to be an ASSERTMSG() only, which is a
-             * no-op in a free build and would silently leave the clone
-             * without a PEB at all; that call site above now fails the
-             * request before reaching here, so this is unreachable in
-             * practice today, but is left as an explicit failure too in
-             * case the branch above is ever completed without this one
-             * being addressed in the same change.
+             * This intentionally does NOT fix up any of the PEB's internal
+             * pointers (ProcessParameters, the heap list, TLS bitmap, etc.):
+             * they're all still valid because they point *within* this same
+             * duplicated address space at the same addresses they had in
+             * Parent, which is exactly the fork() semantics we want here.
              */
-            Status = STATUS_NOT_IMPLEMENTED;
-            goto CleanupWithRef;
+            ASSERT(Parent->Peb != NULL);
+            Process->Peb = Parent->Peb;
         }
 
     }
@@ -927,6 +947,100 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
     }
     _SEH2_END;
 
+    /*
+     * If this was a clone, and our caller (today, only PsCreateCloneProcess())
+     * asked for it, give the child its initial thread now -- a clone of
+     * the CALLING thread's own trap context, patched so that when the
+     * child eventually runs it, it looks like the syscall that got us here
+     * returned STATUS_PROCESS_CLONED rather than falling through the rest
+     * of whatever the parent was doing. This is what lets one call return
+     * "twice", the same contract POSIX fork() has.
+     *
+     * This has to happen down here, not up in the SectionHandle-less
+     * branch that recognized the clone: PspCreateThread() needs a real
+     * HANDLE to the target process when handed a ThreadContext (see its
+     * definition in ntoskrnl/ps/thread.c), and hProcess has only existed
+     * since the ObInsertObject() call above.
+     */
+    if (IsClone && CloneThreadHandle && CloneThreadClientId && NT_SUCCESS(Status))
+    {
+        CONTEXT ClonedContext;
+        CLIENT_ID ChildCid;
+        HANDLE hChildThread;
+
+        /*
+         * Capture the calling thread's OWN context. Because Thread ==
+         * PsGetCurrentThread() here, PsGetContextThread() (ntoskrnl/ps/debug.c)
+         * takes its synchronous "same thread" path -- it reads directly out
+         * of CurrentThread->Tcb.TrapFrame instead of queuing an APC at
+         * another thread, so this is exactly the register/PC state the
+         * CPU will restore on return from the syscall that is, right now,
+         * still executing this very function.
+         */
+        RtlZeroMemory(&ClonedContext, sizeof(CONTEXT));
+        ClonedContext.ContextFlags = CONTEXT_FULL;
+        Status = PsGetContextThread(CurrentThread, &ClonedContext, KernelMode);
+        if (NT_SUCCESS(Status))
+        {
+            /*
+             * Patch the return-value register only. KeSetContextReturnRegister()
+             * (ntoskrnl/include/internal/{i386,amd64,arm,arm64}/ke.h) already
+             * hides the per-architecture register name (Eax on x86, Rax on
+             * x64, ...), so this line needs no #ifdef here.
+             */
+            KeSetContextReturnRegister(&ClonedContext, (ULONG_PTR)STATUS_PROCESS_CLONED);
+
+            /*
+             * NOTE (unverified): InitialTeb is NULL here, so MmCreateTeb()
+             * inside PspCreateThread() will build the child's TEB fresh
+             * (fresh stack-limits fields etc.) rather than duplicate
+             * Parent's calling thread's TEB. On real Windows the cloned
+             * thread keeps using its ORIGINAL stack (which MmCloneAddressSpace()
+             * did faithfully duplicate at the same address, since a thread
+             * stack is just another private VAD), so a fresh TEB's stack
+             * bookkeeping fields (StackBase/StackLimit/DeallocationStack)
+             * may not agree with the stack the cloned CONTEXT's stack
+             * pointer actually points into. This is the one piece of this
+             * change not verified against real behavior -- it would need a
+             * running system (or at least a close reading of MmCreateTeb()
+             * and NtCurrentTeb()-dependent code, e.g. the CRT's stack-guard-page
+             * logic) to confirm whether it matters in practice or needs the
+             * calling thread's actual TEB fields carried over too.
+             */
+            /*
+             * CreateSuspended = TRUE to match the documented contract on
+             * RtlCloneUserProcess()'s prototype (sdk/include/ndk/rtlfuncs.h):
+             * the parent gets a chance to inspect/adjust the clone before
+             * anything runs in it, and is the one who resumes it. (Once
+             * something can actually reach this from user mode -- see
+             * PsCreateCloneProcess()'s own comment -- that caller becomes
+             * responsible for the matching ZwResumeThread().)
+             */
+            Status = PspCreateThread(&hChildThread,
+                                     THREAD_ALL_ACCESS,
+                                     NULL,
+                                     hProcess,
+                                     NULL,
+                                     &ChildCid,
+                                     &ClonedContext,
+                                     NULL,
+                                     TRUE,
+                                     NULL,
+                                     NULL);
+        }
+
+        if (!NT_SUCCESS(Status))
+        {
+            /* Clean up the process too -- a clone with no thread at all
+             * isn't a usable result either */
+            ObCloseHandle(hProcess, PreviousMode);
+            goto CleanupWithRef;
+        }
+
+        *CloneThreadHandle = hChildThread;
+        *CloneThreadClientId = ChildCid;
+    }
+
     /* Run the Notification Routines */
     PspRunCreateProcessNotifyRoutines(Process, TRUE);
 
@@ -969,7 +1083,46 @@ PsCreateSystemProcess(OUT PHANDLE ProcessHandle,
                             NULL,
                             NULL,
                             NULL,
-                            FALSE);
+                            FALSE,
+                            NULL,
+                            NULL);
+}
+
+/*
+ * @unimplemented (see the comment on the prototype in
+ * ntoskrnl/include/internal/ps.h for what's still missing to reach ntdll)
+ *
+ * Kernel-mode entry point for the fork()-emulation ("clone") path: drives
+ * PspCreateProcess's clone branch with a real ThreadHandle/ClientId out
+ * pair, so both the address-space clone and the new initial thread happen
+ * in this one call.
+ */
+NTSTATUS
+NTAPI
+PsCreateCloneProcess(OUT PHANDLE ProcessHandle,
+                     OUT PHANDLE ThreadHandle,
+                     OUT PCLIENT_ID ThreadClientId,
+                     IN ACCESS_MASK DesiredAccess,
+                     IN POBJECT_ATTRIBUTES ObjectAttributes OPTIONAL,
+                     IN HANDLE ParentProcess,
+                     IN HANDLE DebugPort OPTIONAL)
+{
+    /* InheritObjectTable = TRUE mirrors POSIX fork()'s "child inherits the
+     * parent's whole descriptor/handle table" semantics -- see
+     * PROCESS_CREATE_FLAGS_INHERIT_HANDLES below. SectionHandle = NULL plus
+     * a real ParentProcess is what PspCreateProcess recognizes as a clone
+     * request; see its body for the full explanation. */
+    return PspCreateProcess(ProcessHandle,
+                            DesiredAccess,
+                            ObjectAttributes,
+                            ParentProcess,
+                            PROCESS_CREATE_FLAGS_INHERIT_HANDLES,
+                            NULL,
+                            DebugPort,
+                            NULL,
+                            FALSE,
+                            ThreadHandle,
+                            ThreadClientId);
 }
 
 /*
@@ -1442,7 +1595,10 @@ NtCreateProcessEx(OUT PHANDLE ProcessHandle,
     }
     else
     {
-        /* Create a user Process */
+        /* Create a user Process. Note: legacy NtCreateProcess()/
+         * NtCreateProcessEx() never gets a thread out of this even for a
+         * clone request -- see PsCreateCloneProcess() for the only entry
+         * point that does. */
         Status = PspCreateProcess(ProcessHandle,
                                   DesiredAccess,
                                   ObjectAttributes,
@@ -1451,7 +1607,9 @@ NtCreateProcessEx(OUT PHANDLE ProcessHandle,
                                   SectionHandle,
                                   DebugPort,
                                   ExceptionPort,
-                                  InJob);
+                                  InJob,
+                                  NULL,
+                                  NULL);
     }
 
     /* Return Status */

@@ -162,7 +162,81 @@ PspCreateProcess(
     IN HANDLE SectionHandle OPTIONAL,
     IN HANDLE DebugPort OPTIONAL,
     IN HANDLE ExceptionPort OPTIONAL,
-    IN BOOLEAN InJob
+    IN BOOLEAN InJob,
+    /*
+     * Both OPTIONAL/NULL for every caller except PsCreateCloneProcess().
+     * When the request turns out to be a clone (see the big comment in
+     * PspCreateProcess's body), and both of these are non-NULL, the clone
+     * branch also creates the child's initial thread -- a clone of the
+     * CALLING thread's own trap context, patched to return
+     * STATUS_PROCESS_CLONED -- and hands its handle and CID back here
+     * instead of leaving the clone with no thread at all. See
+     * PsCreateCloneProcess() below for the only caller that passes these
+     * today, and its own comment for why nothing yet exposes this to user
+     * mode.
+     */
+    OUT PHANDLE CloneThreadHandle OPTIONAL,
+    OUT PCLIENT_ID CloneThreadClientId OPTIONAL
+);
+
+/*
+ * Kernel-mode-only entry point for the legacy fork()-emulation ("clone")
+ * path of process creation -- the ONE call that clones both the calling
+ * process's address space (via PspCreateProcess's SectionHandle-less/
+ * Parent-given branch, see the FIXME history in ntoskrnl/ps/process.c) and
+ * the calling thread itself (a new initial thread whose context is a copy
+ * of the caller's own, patched to return STATUS_PROCESS_CLONED instead of
+ * falling through).
+ *
+ * NOTE: nothing in ntdll/the Zw* syscall table calls this yet. Exposing it
+ * to user mode (for RtlCloneUserProcess(), sdk/lib/rtl/process.c) would
+ * need a new syscall -- a new ntdll.spec entry wired through to a matching
+ * kernel-mode handler and given a real service number -- which this change
+ * does not add: the syscall-number assignment/registration machinery was
+ * not traced or verified here, and guessing at it risked corrupting the
+ * entire service table for every *other* syscall too. Until that wiring
+ * exists, this is only callable by other kernel-mode code.
+ */
+NTSTATUS
+NTAPI
+PsCreateCloneProcess(
+    OUT PHANDLE ProcessHandle,
+    OUT PHANDLE ThreadHandle,
+    OUT PCLIENT_ID ThreadClientId,
+    IN ACCESS_MASK DesiredAccess,
+    IN POBJECT_ATTRIBUTES ObjectAttributes OPTIONAL,
+    IN HANDLE ParentProcess,
+    IN HANDLE DebugPort OPTIONAL
+);
+
+//
+// Thread Routines
+//
+NTSTATUS
+NTAPI
+PspCreateThread(
+    OUT PHANDLE ThreadHandle,
+    IN ACCESS_MASK DesiredAccess,
+    IN POBJECT_ATTRIBUTES ObjectAttributes OPTIONAL,
+    IN HANDLE ProcessHandle,
+    IN PEPROCESS TargetProcess,
+    OUT PCLIENT_ID ClientId,
+    IN PCONTEXT ThreadContext,
+    IN PINITIAL_TEB InitialTeb,
+    IN BOOLEAN CreateSuspended,
+    IN PKSTART_ROUTINE StartRoutine OPTIONAL,
+    IN PVOID StartContext OPTIONAL
+);
+
+//
+// Debug Routines (ps/debug.c)
+//
+NTSTATUS
+NTAPI
+PsGetContextThread(
+    IN PETHREAD Thread,
+    IN OUT PCONTEXT ThreadContext,
+    IN KPROCESSOR_MODE PreviousMode
 );
 
 //

@@ -2745,15 +2745,26 @@ RtlCreateUserProcess(
 // Duplicates ("clones", cf. POSIX fork()) the calling process and its
 // address space into a brand new process, whose single initial thread is
 // a clone of the calling thread and starts suspended. In the parent, this
-// returns STATUS_SUCCESS with ProcessInformation filled in. The child's
-// copy of the very same call does not return to its caller until the
-// parent resumes the returned thread handle -- at which point it returns
-// STATUS_PROCESS_CLONED instead, which is how the caller tells parent and
-// child apart (exactly like fork()'s 0-vs-pid return).
+// is meant to return STATUS_SUCCESS with ProcessInformation filled in. The
+// child's copy of the very same call is meant to not return to its caller
+// until the parent resumes the returned thread handle -- at which point it
+// returns STATUS_PROCESS_CLONED instead, which is how the caller tells
+// parent and child apart (exactly like fork()'s 0-vs-pid return).
 //
-// See sdk/lib/rtl/process.c for the ntdll-side implementation and
-// ntoskrnl/ps/process.c (PspCreateProcess, the "This is a clone!" branch)
-// for the kernel-mode half this depends on.
+// IMPLEMENTATION STATUS: the kernel-mode half this depends on -- cloning
+// Parent's address space (including its PEB) and, in the same call,
+// cloning the calling thread's own trap context into the child's initial
+// thread -- is implemented; see PspCreateProcess's "This is a clone!"
+// branch and PsCreateCloneProcess() in ntoskrnl/ps/process.c, and
+// MmCloneAddressSpace() in ntoskrnl/mm/ARM3/procsup.c. What's NOT done yet
+// is exposing PsCreateCloneProcess() to user mode: that needs a new
+// syscall (a new ntdll.spec entry plus a registered service number), which
+// was not added here -- see the comment on PsCreateCloneProcess's
+// prototype in ntoskrnl/include/internal/ps.h for why. Until that syscall
+// exists, RtlCloneUserProcess() below can drive the (now-working)
+// address-space/PEB clone via the ordinary ZwCreateProcess() syscall, but
+// has no way to ask the kernel for the matching cloned thread, and so
+// still fails after that point -- see sdk/lib/rtl/process.c.
 //
 NTSYSAPI
 NTSTATUS

@@ -165,6 +165,179 @@ FailPath:
     return Status;
 }
 
+/*
+ * Duplicates Parent's address space into Process, for PspCreateProcess's
+ * legacy fork()-emulation ("clone") path (ntoskrnl/ps/process.c -- see the
+ * big comment there for the history/rationale; this is the FIXME that
+ * comment pointed at).
+ *
+ * APPROACH: eager, page-by-page copy, not lazy COW sharing.
+ *
+ * Real Windows (and a "complete" ReactOS) would give the child new PTEs that
+ * point at the SAME physical pages as the parent, reference-counted and
+ * marked copy-on-write, so the pages only actually fork apart (and get
+ * copied) the first time either side writes to one -- see
+ * MI_IS_PAGE_COPY_ON_WRITE() and its handling throughout
+ * ntoskrnl/mm/ARM3/pagfault.c for the machinery that already exists for
+ * this. This function does not use that machinery: it gives the child
+ * entirely new, private, demand-zero VADs at the same addresses as Parent's
+ * inheritable VADs, then immediately copies every page's *current* contents
+ * across via MiDoMappedCopy(). That is strictly more memory and I/O (every
+ * inherited page is copied right away, even ones neither side ever touches
+ * again) than real COW sharing, but it is correct by construction -- the
+ * child's copy can never alias the parent's, so there is no way to get this
+ * eager version wrong in a way that corrupts the parent's memory. Wiring a
+ * brand new process into ARM3's COW-PTE machinery at creation time (rather
+ * than at the usual place, a later page fault against an existing process)
+ * is unverified territory this change intentionally avoids.
+ *
+ * SCOPE: only PrivateMemory VADs (ordinary VirtualAlloc'd memory: heap,
+ * thread stacks, and -- since MiCreatePebOrTeb() above already marks the
+ * PEB's VAD PrivateMemory -- the PEB itself, see the "We have to clone it"
+ * comment in PspCreateProcess) and any VAD explicitly marked
+ * VadFlags2.Inherit (a distinct, pre-existing bit set by
+ * MmMapViewOfSection() for ViewShare mappings, see ntoskrnl/mm/ARM3/section.c,
+ * meant for a mapped view that should follow a process across this exact
+ * kind of legacy inheritance) are duplicated here. Section-backed VADs that
+ * are neither of those -- the executable image and any DLLs, including
+ * ntdll.dll -- are deliberately left alone: Process->SectionObject is
+ * already set to Parent->SectionObject by our caller, and
+ * PspMapSystemDll() already runs for the clone case exactly as it does for
+ * a normal process, so duplicating those VADs here too would either double
+ * map them or fight over the same address range. The known consequence is
+ * that a clone's own EXE/DLL data pages are NOT forked apart from the
+ * parent's the way POSIX fork() would (both processes keep sharing the
+ * same image ControlArea, as if the image were entirely read-only);
+ * genuinely correct handling of writable image data pages would need the
+ * same COW machinery this function is deliberately avoiding.
+ *
+ * LOCKING: Parent's address-space lock (AddressCreationLock) is held for
+ * the parent tree walk via MmLockAddressSpace()/MmUnlockAddressSpace() --
+ * for simplicity, across the *entire* clone (including the per-VAD copies),
+ * not just a quick snapshot pass. This is coarser than necessary (it can
+ * make other threads in Parent doing VirtualAlloc/VirtualFree block for the
+ * duration of the clone), but it sidesteps any question of what happens if
+ * Parent's VAD tree is mutated out from under a partially-finished clone;
+ * fork() is not a hot path, so trading a little latency for a simple,
+ * obviously-race-free implementation seemed like the right call here.
+ */
+NTSTATUS
+NTAPI
+MmCloneAddressSpace(IN PEPROCESS Parent,
+                     IN PEPROCESS Process)
+{
+    PMMVAD Vad;
+    PMMVAD_LONG NewVad;
+    ULONG_PTR RegionBase, InsertBase;
+    SIZE_T RegionSize, Copied;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    /* Lock Parent's address space for the whole walk -- see LOCKING above.
+     * This also satisfies vadnode.c's ASSERT_LOCKED_FOR_READ() (debug
+     * builds only), since MmLockAddressSpace() is exactly
+     * KeAcquireGuardedMutex(&Parent->AddressCreationLock). */
+    MmLockAddressSpace(&Parent->Vm);
+
+    if (Parent->VadRoot.NumberGenericTableElements != 0)
+    {
+        /* Find the first (lowest-address) VAD: descend all the way left
+         * from the real root (BalancedRoot is a sentinel whose RightChild
+         * is the actual root -- the same idiom NtQueryVirtualMemory uses
+         * in ntoskrnl/mm/ARM3/virtual.c to start a VAD scan). */
+        Vad = (PMMVAD)Parent->VadRoot.BalancedRoot.RightChild;
+        while (Vad->LeftChild) Vad = Vad->LeftChild;
+
+        while (Vad != NULL)
+        {
+            if (Vad->u.VadFlags.PrivateMemory || Vad->u2.VadFlags2.Inherit)
+            {
+                RegionBase = Vad->StartingVpn << PAGE_SHIFT;
+                RegionSize = (Vad->EndingVpn - Vad->StartingVpn + 1) << PAGE_SHIFT;
+
+                /* Charge quota the same way every other VAD creator in this
+                 * file does before allocating the pool for it */
+                Status = PsChargeProcessNonPagedPoolQuota(Process,
+                                                          sizeof(MMVAD_LONG));
+                if (!NT_SUCCESS(Status)) break;
+
+                NewVad = ExAllocatePoolWithTag(NonPagedPool,
+                                               sizeof(MMVAD_LONG),
+                                               'cdaV');
+                if (!NewVad)
+                {
+                    PsReturnProcessNonPagedPoolQuota(Process, sizeof(MMVAD_LONG));
+                    Status = STATUS_INSUFFICIENT_RESOURCES;
+                    break;
+                }
+
+                RtlZeroMemory(NewVad, sizeof(MMVAD_LONG));
+                NewVad->u.VadFlags.MemCommit = TRUE;
+                NewVad->u.VadFlags.PrivateMemory = TRUE;
+                NewVad->u.VadFlags.Protection = Vad->u.VadFlags.Protection;
+                NewVad->ControlArea = NULL;
+
+                /*
+                 * MiInsertVadEx() (like MiCreatePebOrTeb() above) works
+                 * against PsGetCurrentProcess(), not an explicit process
+                 * argument, so we have to actually be attached to the
+                 * child for the insert -- same pattern MmCreatePeb() uses
+                 * around MiCreatePebOrTeb().
+                 */
+                InsertBase = RegionBase;
+                KeAttachProcess(&Process->Pcb);
+                Status = MiInsertVadEx((PMMVAD)NewVad,
+                                       &InsertBase,
+                                       RegionSize,
+                                       (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS,
+                                       PAGE_SIZE,
+                                       0);
+                KeDetachProcess();
+
+                if (!NT_SUCCESS(Status))
+                {
+                    PsReturnProcessNonPagedPoolQuota(Process, sizeof(MMVAD_LONG));
+                    ExFreePoolWithTag(NewVad, 'cdaV');
+                    break;
+                }
+
+                /*
+                 * The child now has a committed, but entirely demand-zero,
+                 * VAD at the same address as Parent's. Eagerly bring the
+                 * actual page contents across: MiDoMappedCopy() attaches to
+                 * both Parent (to read) and Process (to write) itself, and
+                 * an ordinary write into a committed-but-unfaulted private
+                 * VAD takes the normal #PF path and gets a real page
+                 * allocated for it exactly like any other first write would
+                 * -- this is the same mechanism NtWriteVirtualMemory()
+                 * already relies on for cross-process writes.
+                 */
+                Status = MiDoMappedCopy(Parent,
+                                        (PVOID)RegionBase,
+                                        Process,
+                                        (PVOID)RegionBase,
+                                        RegionSize,
+                                        KernelMode,
+                                        &Copied);
+                if (!NT_SUCCESS(Status)) break;
+            }
+
+            Vad = (PMMVAD)MiGetNextNode((PMMADDRESS_NODE)Vad);
+        }
+    }
+
+    MmUnlockAddressSpace(&Parent->Vm);
+
+    /*
+     * On failure we leave whatever partial state we built in Process's
+     * VadRoot behind: PspCreateProcess's caller tears down the whole
+     * (never-yet-published) Process object via the normal
+     * ObDereferenceObject()/PspDeleteProcess() path on any failure return,
+     * which already knows how to walk and free a VadRoot in any state, so
+     * there is no bespoke unwind needed here.
+     */
+    return Status;
+}
+
 VOID
 NTAPI
 MmDeleteTeb(IN PEPROCESS Process,

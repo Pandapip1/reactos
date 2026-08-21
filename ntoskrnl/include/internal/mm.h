@@ -765,6 +765,24 @@ MmInitializeProcessAddressSpace(
     IN POBJECT_NAME_INFORMATION *AuditName OPTIONAL
 );
 
+/*
+ * Duplicates every inheritable VAD of Parent into Process, eagerly copying
+ * the backing pages across (see the big comment on the definition in
+ * procsup.c for why this is an eager copy rather than wiring the new VADs
+ * into ARM3's lazy COW-PTE machinery). Used by PspCreateProcess's legacy
+ * fork()-emulation ("clone") path -- see ntoskrnl/ps/process.c.
+ *
+ * Process must already have gone through MmInitializeProcessAddressSpace()
+ * (so it has an initialized VadRoot/AddressCreationLock to insert into)
+ * before this is called.
+ */
+NTSTATUS
+NTAPI
+MmCloneAddressSpace(
+    IN PEPROCESS Parent,
+    IN PEPROCESS Process
+);
+
 NTSTATUS
 NTAPI
 MmCreatePeb(
