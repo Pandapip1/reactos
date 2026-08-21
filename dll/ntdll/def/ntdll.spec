@@ -677,7 +677,7 @@
 @ stdcall RtlClearAllBits(ptr)
 @ stdcall RtlClearBits(ptr long long)
 @ stdcall RtlCloneMemoryStream(ptr ptr)
-@ stdcall -stub -version=0x600+ RtlCloneUserProcess(long long long long long)
+@ stdcall -version=0x600+ RtlCloneUserProcess(long long long long long)
 @ stdcall -ret64 -version=0x600+ RtlCmDecodeMemIoResource(ptr ptr)
 @ stdcall -version=0x600+ RtlCmEncodeMemIoResource(ptr long int64 int64)
 @ stdcall -stub -version=0x600+ RtlCommitDebugInfo(ptr long)

@@ -2741,6 +2741,31 @@ RtlCreateUserProcess(
     _Out_ PRTL_USER_PROCESS_INFORMATION ProcessInfo
 );
 
+//
+// Duplicates ("clones", cf. POSIX fork()) the calling process and its
+// address space into a brand new process, whose single initial thread is
+// a clone of the calling thread and starts suspended. In the parent, this
+// returns STATUS_SUCCESS with ProcessInformation filled in. The child's
+// copy of the very same call does not return to its caller until the
+// parent resumes the returned thread handle -- at which point it returns
+// STATUS_PROCESS_CLONED instead, which is how the caller tells parent and
+// child apart (exactly like fork()'s 0-vs-pid return).
+//
+// See sdk/lib/rtl/process.c for the ntdll-side implementation and
+// ntoskrnl/ps/process.c (PspCreateProcess, the "This is a clone!" branch)
+// for the kernel-mode half this depends on.
+//
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlCloneUserProcess(
+    _In_ ULONG ProcessFlags,
+    _In_opt_ PSECURITY_DESCRIPTOR ProcessSecurityDescriptor,
+    _In_opt_ PSECURITY_DESCRIPTOR ThreadSecurityDescriptor,
+    _In_opt_ HANDLE DebugPort,
+    _Out_ PRTL_USER_PROCESS_INFORMATION ProcessInformation
+);
+
 #if (NTDDI_VERSION >= NTDDI_WIN7)
 NTSYSAPI
 NTSTATUS

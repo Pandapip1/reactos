@@ -388,6 +388,127 @@ RtlCreateUserProcess(IN PUNICODE_STRING ImageFileName,
 }
 
 /*
+ * @unimplemented
+ *
+ * Duplicates ("clones", cf. POSIX fork()) the calling process into a new
+ * process, whose single initial thread starts suspended and is itself a
+ * clone of the calling thread. See the header comment on the prototype in
+ * <ndk/rtlfuncs.h> for the parent/child return-value contract.
+ *
+ * ARCHITECTURE:
+ *
+ * Unlike RtlCreateUserProcess() above, this does not map a new image: it
+ * asks ZwCreateProcess() to clone the CALLING process's own address space
+ * by passing SectionHandle = NULL together with a Parent (ourselves). That
+ * is not a new code path -- it is the exact legacy fork()-emulation trick
+ * real pre-Vista NT exposed via NtCreateProcess() (used by e.g. Interix and
+ * Cygwin's fork()), and ReactOS's PspCreateProcess() (ntoskrnl/ps/process.c)
+ * already RECOGNIZES this case ("no section handle, but a parent process
+ * given" => "This is a clone!"), it just doesn't do anything about it yet:
+ * both places that would need to build the child's address space and PEB
+ * currently just hit `ASSERTMSG("No support for cloning yet\n", FALSE)` and
+ * fall through -- which, because ASSERTMSG compiles to a no-op in a free
+ * (non-debug) build, silently leaves the "cloned" process with no address
+ * space content and no PEB at all. See PspCreateProcess() for the two exact
+ * spots (they were changed, alongside this function, to fail cleanly with
+ * STATUS_NOT_IMPLEMENTED instead of silently falling through).
+ *
+ * Even once that kernel-mode address-space clone exists, this function
+ * still cannot correctly create the child's initial thread by itself:
+ * unlike RtlCreateUserProcess() (which points a fresh thread at a fixed,
+ * known entry point -- the image's TransferAddress -- via
+ * RtlCreateUserThread()), a clone's child thread must resume execution at
+ * the exact instruction, with the exact register and stack state, that the
+ * calling thread had at the moment of THIS call -- i.e. it must look, to
+ * the child, as if THIS call returned STATUS_PROCESS_CLONED instead of
+ * falling through to the rest of this function. Doing that portably from
+ * ntdll alone (e.g. by RtlCaptureContext() plus a hand-patched CONTEXT
+ * record fed to ZwCreateThread) is fragile: nothing guarantees a plain C
+ * "return Status;" a few lines below actually reads that value back out of
+ * a live CPU register rather than recomputing it, so nothing here has
+ * pretended to already do that. The robust way to get this right is to let
+ * the KERNEL do it: the syscall that creates the process is already running
+ * on top of the calling thread's own trap frame (the exact CPU state the
+ * kernel saved when this thread entered kernel mode for this very call), so
+ * the "clone the calling thread's continuation point" step belongs in
+ * kernel mode too, sitting on top of the *already-existing*
+ * PsGetContextThread() (ntoskrnl/ps/debug.c, used by NtGetContextThread /
+ * Win32 GetThreadContext) to snapshot that trap frame into a CONTEXT
+ * record, with only the return-value register patched to
+ * STATUS_PROCESS_CLONED before it becomes the new thread's initial context.
+ * That plumbing does not exist yet either -- it would most naturally live
+ * as a new capability of PspCreateProcess's clone branch (so ONE syscall
+ * clones the address space *and* the calling thread), rather than a second,
+ * separate ZwCreateThread call from here.
+ *
+ * Given both kernel-mode pieces above are unimplemented, this cannot
+ * succeed today. It performs the ZwCreateProcess() clone request (which
+ * itself will fail once the kernel-mode change below is in place, or
+ * silently misbehave without it -- see the FIXMEs in PspCreateProcess) and
+ * then stops, rather than fabricate a plausible-looking but unverified
+ * thread-cloning step.
+ */
+NTSTATUS
+NTAPI
+RtlCloneUserProcess(IN ULONG ProcessFlags,
+                    IN PSECURITY_DESCRIPTOR ProcessSecurityDescriptor OPTIONAL,
+                    IN PSECURITY_DESCRIPTOR ThreadSecurityDescriptor OPTIONAL,
+                    IN HANDLE DebugPort OPTIONAL,
+                    OUT PRTL_USER_PROCESS_INFORMATION ProcessInformation)
+{
+    NTSTATUS Status;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    DPRINT1("RtlCloneUserProcess is not fully implemented -- the kernel-mode "
+            "address-space and thread clone it depends on (PspCreateProcess's "
+            "clone branch) is not implemented yet\n");
+
+    if (!ProcessInformation ||
+        ProcessInformation->Size < sizeof(RTL_USER_PROCESS_INFORMATION))
+    {
+        return STATUS_INFO_LENGTH_MISMATCH;
+    }
+
+    RtlZeroMemory(ProcessInformation, sizeof(RTL_USER_PROCESS_INFORMATION));
+    ProcessInformation->Size = sizeof(RTL_USER_PROCESS_INFORMATION);
+
+    InitializeObjectAttributes(&ObjectAttributes,
+                               NULL,
+                               0,
+                               NULL,
+                               ProcessSecurityDescriptor);
+
+    /*
+     * SectionHandle = NULL + ParentProcess = ourselves is what tells
+     * PspCreateProcess this is a clone rather than a new-image process; see
+     * the comment above. InheritObjectTable = TRUE mirrors POSIX fork()'s
+     * "child inherits the parent's whole descriptor/handle table" semantics.
+     */
+    Status = ZwCreateProcess(&ProcessInformation->ProcessHandle,
+                             PROCESS_ALL_ACCESS,
+                             &ObjectAttributes,
+                             NtCurrentProcess(),
+                             TRUE,
+                             NULL,
+                             DebugPort,
+                             NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        /* Expected for now: see PspCreateProcess's clone branch */
+        return Status;
+    }
+
+    /*
+     * We have a (possibly still address-space-less, until the kernel-mode
+     * FIXME above is resolved) child process object, but no portable way to
+     * give it a correctly-resuming initial thread yet. Rather than create a
+     * thread that would start somewhere meaningless, fail explicitly.
+     */
+    ZwClose(ProcessInformation->ProcessHandle);
+    ProcessInformation->ProcessHandle = NULL;
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+/*
  * @implemented
  */
 PVOID

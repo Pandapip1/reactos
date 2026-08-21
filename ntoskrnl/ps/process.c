@@ -650,8 +650,46 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
             //
             NeedsPeb = TRUE;
 
-            /* This is a clone! */
-            ASSERTMSG("No support for cloning yet\n", FALSE);
+            /*
+             * This is a clone! (SectionHandle == NULL but we do have a
+             * Parent that isn't the system process.) This is the exact
+             * legacy fork()-emulation path real pre-Vista NT exposed via
+             * NtCreateProcess() -- e.g. Interix/Cygwin's fork() -- and it is
+             * what ntdll's RtlCloneUserProcess() (sdk/lib/rtl/process.c)
+             * drives.
+             *
+             * FIXME: Cloning is not implemented. What's missing here is a
+             * genuine duplication of Parent's entire address space (walk
+             * Parent->VadRoot -- an AVL tree of MMVAD, see
+             * ntoskrnl/mm/ARM3/vadnode.c's MiInsertVad()/MiGetNextNode() for
+             * the existing walk/insert primitives -- and for every VAD
+             * marked Inherit (MMVAD_FLAGS.Inherit, MMVAD_FLAGS.PrivateMemory
+             * already exist as struct fields, see mmtypes.h, so this was
+             * anticipated but never wired up) create an equivalent VAD in
+             * Process and duplicate its backing pages into Process's page
+             * tables). A first cut need not implement true lazy
+             * copy-on-write sharing (ARM3 already understands COW PTEs --
+             * see MI_IS_PAGE_COPY_ON_WRITE() throughout
+             * ntoskrnl/mm/ARM3/pagfault.c -- but wiring a *new* process into
+             * that machinery at creation time, rather than at a later page
+             * fault, is unverified territory); an eager, page-by-page copy
+             * using the existing cross-process copy routine MiDoMappedCopy()
+             * (ntoskrnl/mm/ARM3/virtual.c, already used by
+             * NtReadVirtualMemory/NtWriteVirtualMemory) would give correct
+             * fork() *semantics* (the child's mutations must never reach the
+             * parent) without needing new PFN-refcounting/COW-PTE code.
+             *
+             * Previously this was only an ASSERTMSG(), which compiles to a
+             * no-op in a free/non-debug build (see ASSERTMSG's definition in
+             * ndk/rtlfuncs.h and reactos/debug.h) -- meaning a release
+             * ReactOS silently fell through with NeedsPeb left TRUE but no
+             * address space content and (see below) no PEB either, handing
+             * the caller a process object that looks created but is not
+             * usable. Fail the request cleanly instead until this is
+             * actually implemented.
+             */
+            Status = STATUS_NOT_IMPLEMENTED;
+            goto CleanupWithRef;
         }
         else
         {
@@ -742,7 +780,30 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
             //
             // We have to clone it
             //
-            ASSERTMSG("No support for cloning yet\n", FALSE);
+            /*
+             * FIXME: Cloning the PEB is not implemented. Real Windows/a
+             * finished ReactOS would duplicate Parent's PEB contents (most
+             * of it, e.g. NLS table pointers and OS version fields, is
+             * process-invariant and could just be recomputed the way
+             * MmCreatePeb() above already does for a fresh PEB; the parts
+             * that matter -- ProcessParameters, the heap list, TLS bitmap,
+             * etc. -- are exactly the private/inherited memory this
+             * function's other FIXME (a few dozen lines up, in the
+             * SectionHandle-less branch) is about, so a correct
+             * implementation of that address-space clone would likely make
+             * this PEB page just another inherited VAD rather than a
+             * separately-constructed object).
+             *
+             * As above, this used to be an ASSERTMSG() only, which is a
+             * no-op in a free build and would silently leave the clone
+             * without a PEB at all; that call site above now fails the
+             * request before reaching here, so this is unreachable in
+             * practice today, but is left as an explicit failure too in
+             * case the branch above is ever completed without this one
+             * being addressed in the same change.
+             */
+            Status = STATUS_NOT_IMPLEMENTED;
+            goto CleanupWithRef;
         }
 
     }
