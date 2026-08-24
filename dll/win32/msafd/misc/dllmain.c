@@ -1333,6 +1333,22 @@ WSPSelect(IN int nfds,
     if( exceptfds )
         FD_ZERO(exceptfds);
 
+    /* The request and the reply share one METHOD_BUFFERED buffer, so on a
+     * failure the I/O manager has copied nothing back and what is still in
+     * it is the request: HandleCount is the count we asked for and every
+     * Handles[i].Events is the mask we asked about.  Reading that would
+     * report every polled socket as ready.  STATUS_TIMEOUT is a success
+     * code and stays on the normal path; the driver reports it with a
+     * HandleCount of zero, which the loop below handles by itself. */
+    if (!NT_SUCCESS(Status))
+    {
+        ERR("IOCTL_AFD_SELECT failed, 0x%08x\n", Status);
+        if (lpErrno) *lpErrno = WSAEINVAL;
+        HeapFree(GlobalHeap, 0, PollBuffer);
+        NtClose(SockEvent);
+        return SOCKET_ERROR;
+    }
+
     /* Loop through return structure */
     HandleCount = PollInfo->HandleCount;
 
