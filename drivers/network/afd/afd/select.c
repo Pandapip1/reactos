@@ -31,14 +31,23 @@ static VOID PrintEvents( ULONG Events ) {
 #endif
 }
 
-static VOID CopyBackStatus( PAFD_HANDLE HandleArray,
-                            UINT HandleCount ) {
-    UINT i;
+/* Only the handles that actually have events are reported back, packed at
+ * the start of the array, so the caller has to match on Handle and not on
+ * the position it passed the handle in at.  Returns the number of them. */
+static UINT CompactHandleArray( PAFD_HANDLE HandleArray,
+                                UINT HandleCount ) {
+    UINT i, Signalled = 0;
 
     for( i = 0; i < HandleCount; i++ ) {
-        HandleArray[i].Events = HandleArray[i].Status;
-        HandleArray[i].Status = 0;
+        if( !HandleArray[i].Status ) continue;
+
+        HandleArray[Signalled].Handle = HandleArray[i].Handle;
+        HandleArray[Signalled].Events = HandleArray[i].Status;
+        HandleArray[Signalled].Status = 0;
+        Signalled++;
     }
+
+    return Signalled;
 }
 
 VOID ZeroEvents( PAFD_HANDLE HandleArray,
@@ -60,7 +69,7 @@ VOID SignalSocket(
    NTSTATUS Status
    )
 {
-    UINT i;
+    UINT i, Signalled;
     PIRP Irp = _Irp ? _Irp : Poll->Irp;
     AFD_DbgPrint(MID_TRACE,("Called (Status %x)\n", Status));
 
@@ -71,12 +80,13 @@ VOID SignalSocket(
         ExFreePoolWithTag(Poll, TAG_AFD_ACTIVE_POLL);
     }
 
+    Signalled = CompactHandleArray( PollReq->Handles,
+                                    PollReq->HandleCount );
+
     Irp->IoStatus.Status = Status;
     Irp->IoStatus.Information =
-        FIELD_OFFSET(AFD_POLL_INFO, Handles) + sizeof(AFD_HANDLE) * PollReq->HandleCount;
-    CopyBackStatus( PollReq->Handles,
-                    PollReq->HandleCount );
-    for( i = 0; i < PollReq->HandleCount; i++ ) {
+        FIELD_OFFSET(AFD_POLL_INFO, Handles) + sizeof(AFD_HANDLE) * Signalled;
+    for( i = 0; i < Signalled; i++ ) {
         AFD_DbgPrint
             (MAX_TRACE,
              ("Handle(%x): Got %x,%x\n",
@@ -85,6 +95,7 @@ VOID SignalSocket(
               PollReq->Handles[i].Status));
     }
     UnlockHandles( AFD_HANDLES(Irp), PollReq->HandleCount );
+    PollReq->HandleCount = Signalled;
     if( Irp->MdlAddress ) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
     AFD_DbgPrint(MID_TRACE,("Completing\n"));
     (void)IoSetCancelRoutine(Irp, NULL);
