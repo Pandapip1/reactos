@@ -753,7 +753,60 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
         PFILE_END_OF_FILE_INFORMATION EndOfFileInfo;
 
         /* TODO: Allocation size is not actually the same as file end for NTFS,
-           however, few applications are likely to make the distinction. */
+           however, few applications are likely to make the distinction.
+
+           Real Windows treats the two classes very differently. Measured on
+           Windows 11 Pro 22621, NTFS with 4096-byte clusters, by querying
+           FILE_STANDARD_INFORMATION before and after the set (identical results
+           under WOW64 and native x86_64):
+
+             initial EndOfFile | requested allocation | result
+             ------------------+----------------------+-------------------------
+                             0 |                 4096 | EndOfFile stays 0,
+                               |                      | AllocationSize 0 -> 4096
+                            64 |                 4096 | EndOfFile stays 64,
+                               |                      | AllocationSize 64 -> 4096
+                          4096 |                  100 | nothing changes at all
+                          4096 |                    0 | EndOfFile 4096 -> 0
+                         16384 |                  100 | EndOfFile 16384 -> 4096
+                         16384 |                 8192 | EndOfFile 16384 -> 8192
+                         16384 |                16384 | nothing changes
+
+           The rule: round the requested allocation up to the cluster size; if
+           the rounded value is below EndOfFile, truncate the file to it;
+           otherwise leave the file size alone and only grow the allocation.
+           This matches the documented contract in ntifs.h's Remarks for
+           FILE_ALLOCATION_INFORMATION: "The end-of-file position must always be
+           less than or equal to the allocation size. If the allocation size is
+           set to a value that is less than the end-of-file position, the
+           end-of-file position is automatically adjusted to match the
+           allocation size."
+
+           The fall-through below diverges in both directions. With EndOfFile 0
+           and a request of 4096, Windows leaves EndOfFile at 0 while we set it
+           to 4096. Worse, with EndOfFile 4096 and a request of 100, Windows
+           changes nothing (100 rounds up to a single cluster, which the file
+           already occupies) while we truncate to 100 and destroy 4 KB that
+           Windows preserves. With EndOfFile 16384 and a request of 100, Windows
+           truncates to 4096 and we truncate to 100.
+
+           Note for anyone writing a test: the EndOfFile 4096 / request 100 row
+           is the discriminating case. On its own it looks like "small requests
+           are ignored", which is a clean, plausible and wrong rule; only the
+           16384 rows expose the cluster rounding. A test built solely around
+           the 4096 case passes against a wrong implementation, and here it
+           would mask a data-destroying one.
+
+           fastfat already has the correct shape: see FatSetAllocationInfo() in
+           drivers/filesystems/fastfat/fileinfo.c, which grows the allocation
+           when the request exceeds it and lowers FileSize only when the new
+           allocation falls below it.
+
+           This is left as-is deliberately. Doing it properly needs cluster-size
+           rounding plus a conditional truncate, which in turn needs this driver
+           to track allocation size separately from file size -- something it
+           does not do at all today. That is a structural change to the NTFS
+           write path, not a local fix. */
         case FileAllocationInformation:
             DPRINT1("FIXME: Using hacky method of setting FileAllocationInformation.\n");
         case FileEndOfFileInformation:
