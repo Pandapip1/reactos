@@ -52,12 +52,23 @@ typedef struct _AFD_HANDLE_ {
     NTSTATUS			        Status;
 } AFD_HANDLE, *PAFD_HANDLE;
 
+/*
+ * Exclusive is a single byte followed by padding, not a pointer-sized
+ * field. Declaring it ULONG_PTR happens to be right on i386 and wrong on
+ * x86_64, where it pushes Handles to +24 instead of +16. phnt calls this
+ * field Unique; Wine, wepoll, libuv and mio all call it exclusive and all
+ * agree on the +16 array offset.
+ */
 typedef struct _AFD_POLL_INFO {
     LARGE_INTEGER		        Timeout;
     ULONG				HandleCount;
-    ULONG_PTR                               Exclusive;
+    BOOLEAN                                 Exclusive;
     AFD_HANDLE			        Handles[1];
 } AFD_POLL_INFO, *PAFD_POLL_INFO;
+
+C_ASSERT(FIELD_OFFSET(AFD_POLL_INFO, HandleCount) == 8);
+C_ASSERT(FIELD_OFFSET(AFD_POLL_INFO, Exclusive) == 12);
+C_ASSERT(FIELD_OFFSET(AFD_POLL_INFO, Handles) == 16);
 
 typedef struct _AFD_ACCEPT_DATA {
     ULONG				UseSAN;
