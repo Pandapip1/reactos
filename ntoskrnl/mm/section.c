@@ -478,7 +478,31 @@ l_ReadHeaderFromFile:
     if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, SectionAlignment) &&
             RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, FileAlignment))
     {
-        /* See [1], section 3.4.2 */
+        /*
+         * See [1], section 3.4.2: a sub-page SectionAlignment is legal as
+         * long as FileAlignment matches it, in which case the image is
+         * mapped flat (raw file bytes, no per-section relocation of RVAs).
+         *
+         * This is deliberately kept as-is because it is the NT 5.x rule,
+         * and NT 5.2 is what we target (see README.md and _WIN32_WINNT in
+         * the top-level CMakeLists.txt).
+         *
+         * Be aware that NT 6.0 and later tightened this: modern Windows
+         * rejects *every* image whose SectionAlignment is below the page
+         * size with STATUS_INVALID_IMAGE_FORMAT / ERROR_BAD_EXE_FORMAT,
+         * even when FileAlignment == SectionAlignment. This was measured
+         * directly on Windows 11 Pro 22621, and it matches Wine's
+         * loader test data, whose every sub-page-alignment case accepts
+         * ERROR_BAD_EXE_FORMAT with comments reading "vista is more
+         * strict" and "rejected by win10 1809+"
+         * (dlls/kernel32/tests/loader.c, test_Loader).
+         *
+         * So we are more permissive than current Windows here, and exactly
+         * as permissive as the Windows we aim at. Do not "fix" this in
+         * either direction without deciding which target we want: making
+         * it unconditional would stop us from running flat-mapped images
+         * that genuinely load on Windows Server 2003.
+         */
         if(piohOptHeader->SectionAlignment < PAGE_SIZE)
         {
             if(piohOptHeader->FileAlignment != piohOptHeader->SectionAlignment)
