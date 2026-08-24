@@ -98,11 +98,16 @@ typedef struct IPADDR_ENTRY {
 					   * for ancillary data on packet
 					   * requests. */
 
-/* XXX This is a hack we should clean up later
- * We do this in order to get some storage for the locked handle table
- * Maybe I'll use some tail item in the irp instead */
-#define AFD_HANDLES(x) ((PAFD_HANDLE)(x)->Exclusive)
-#define SET_AFD_HANDLES(x,y) (((x)->Exclusive) = (ULONG_PTR)(y))
+/* Storage for the locked handle table belonging to an AFD_POLL_INFO
+ * request. This used to be stashed in the caller's AFD_POLL_INFO.Exclusive
+ * field, which forced that field to be pointer-sized (it is not, on
+ * Windows) and leaked a kernel pointer back to user mode, because the
+ * METHOD_BUFFERED output copies the whole structure back. Use the IRP's
+ * own driver-private storage instead. DriverContext[0], [1] and [3] are
+ * already taken by LockRequest() and the write path. */
+#define AFD_HANDLES(_Irp) ((PAFD_HANDLE)(_Irp)->Tail.Overlay.DriverContext[2])
+#define SET_AFD_HANDLES(_Irp, _HandleTable) \
+    ((_Irp)->Tail.Overlay.DriverContext[2] = (PVOID)(_HandleTable))
 
 typedef struct _AFD_MAPBUF {
     PVOID BufferAddress;
