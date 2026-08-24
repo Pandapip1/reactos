@@ -325,8 +325,51 @@ AfdCreateSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     EaInfo = Irp->AssociatedIrp.SystemBuffer;
 
     if( EaInfo ) {
+        /* IoCheckEaBufferValidity() has already verified that EaName is
+         * NUL-terminated at EaNameLength and that EaValueLength bytes really
+         * follow it inside the buffer. Everything below that is up to us:
+         * the contents of the open packet are entirely attacker-controlled,
+         * so validate them before dereferencing anything. */
+
+        /* An endpoint is only created for the "AfdOpenPacketXX" EA. Any other
+         * EA name is not an open packet and must not be parsed as one. */
+        if( EaInfo->EaNameLength != AFD_PACKET_COMMAND_LENGTH ||
+            RtlCompareMemory( EaInfo->EaName,
+                              AfdCommand,
+                              AFD_PACKET_COMMAND_LENGTH ) !=
+            AFD_PACKET_COMMAND_LENGTH ) {
+            AFD_DbgPrint(MIN_TRACE,("Unrecognized EA name\n"));
+            Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+            IoCompleteRequest( Irp, IO_NO_INCREMENT );
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        /* The EA value must at least hold the fixed part of the packet. */
+        if( EaInfo->EaValueLength <
+            FIELD_OFFSET(AFD_CREATE_PACKET, TransportName) ) {
+            AFD_DbgPrint(MIN_TRACE,("EA value too small for an open packet\n"));
+            Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+            IoCompleteRequest( Irp, IO_NO_INCREMENT );
+            return STATUS_INVALID_PARAMETER;
+        }
+
         ConnectInfo = (PAFD_CREATE_PACKET)(EaInfo->EaName + EaInfo->EaNameLength + 1);
         EaInfoValue = (PWCHAR)(((PCHAR)ConnectInfo) + sizeof(AFD_CREATE_PACKET));
+
+        /* SizeOfTransportName is in bytes and comes straight from the caller.
+         * Without this check the RtlCopyMemory() below reads that many bytes
+         * past the end of the (much smaller) EA buffer. */
+        if( ConnectInfo->SizeOfTransportName >
+            EaInfo->EaValueLength -
+            FIELD_OFFSET(AFD_CREATE_PACKET, TransportName) ) {
+            AFD_DbgPrint(MIN_TRACE,("Transport name of %u bytes does not fit "
+                                    "in an EA value of %u bytes\n",
+                                    ConnectInfo->SizeOfTransportName,
+                                    EaInfo->EaValueLength));
+            Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+            IoCompleteRequest( Irp, IO_NO_INCREMENT );
+            return STATUS_INVALID_PARAMETER;
+        }
 
         //EaLength = sizeof(FILE_FULL_EA_INFORMATION) + EaInfo->EaNameLength + EaInfo->EaValueLength;
 
