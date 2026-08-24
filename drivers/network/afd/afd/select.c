@@ -224,6 +224,11 @@ AfdSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
         Status = STATUS_SUCCESS;
         Irp->IoStatus.Status = Status;
         SignalSocket( NULL, Irp, PollReq, Status );
+    } else if( PollReq->Timeout.QuadPart == 0 ) {
+        /* A zero timeout means the caller does not want to block at all */
+        Status = STATUS_SUCCESS;
+        Irp->IoStatus.Status = Status;
+        SignalSocket( NULL, Irp, PollReq, Status );
     } else {
 
        PAFD_ACTIVE_POLL Poll = NULL;
