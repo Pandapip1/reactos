@@ -114,12 +114,22 @@ typedef struct _AFD_SEND_INFO_UDP {
 
 C_ASSERT(sizeof(AFD_RECV_INFO) == sizeof(AFD_SEND_INFO));
 
+/*
+ * RootEndpoint and ConnectEndpoint are endpoint handles, not ULONGs. They
+ * were declared as ULONG here, which happens to be right on i386 and wrong
+ * on x86_64, where it puts RemoteAddress at +12 instead of +24 and cannot
+ * hold a handle value at all. The i386 layout is unchanged.
+ */
 typedef struct  _AFD_CONNECT_INFO {
     BOOLEAN				UseSAN;
-    ULONG				Root;
-    ULONG				Unknown;
+    HANDLE				RootEndpoint;
+    HANDLE				ConnectEndpoint;
     TRANSPORT_ADDRESS			RemoteAddress;
 } AFD_CONNECT_INFO , *PAFD_CONNECT_INFO ;
+
+C_ASSERT(FIELD_OFFSET(AFD_CONNECT_INFO, RootEndpoint) == sizeof(PVOID));
+C_ASSERT(FIELD_OFFSET(AFD_CONNECT_INFO, ConnectEndpoint) == 2 * sizeof(PVOID));
+C_ASSERT(FIELD_OFFSET(AFD_CONNECT_INFO, RemoteAddress) == 3 * sizeof(PVOID));
 
 typedef struct _AFD_SUPER_CONNECT_INFO
 {

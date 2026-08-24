@@ -2047,9 +2047,9 @@ WSPConnect(SOCKET Handle,
     }
 
     /* AFD doesn't seem to care if these are invalid, but let's 0 them anyways */
-    ConnectInfo->Root = 0;
+    ConnectInfo->RootEndpoint = NULL;
     ConnectInfo->UseSAN = FALSE;
-    ConnectInfo->Unknown = 0;
+    ConnectInfo->ConnectEndpoint = NULL;
 
     /* Verify if we should use APC */
     if (Socket->SharedData->NonBlocking)

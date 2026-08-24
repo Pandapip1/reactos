@@ -215,7 +215,9 @@ AfdConnect(
         return Status;
     }
 
-    ASSERT(FIELD_OFFSET(AFD_CONNECT_INFO, RemoteAddress.Address[0].Address) == 20);
+    /* 3 pointer-sized fields, then TAAddressCount, AddressLength and AddressType */
+    ASSERT(FIELD_OFFSET(AFD_CONNECT_INFO, RemoteAddress.Address[0].Address) ==
+           3 * sizeof(PVOID) + sizeof(LONG) + 2 * sizeof(USHORT));
     ConnectInfoLength = FIELD_OFFSET(AFD_CONNECT_INFO, RemoteAddress.Address[0].Address) +
                         AddressLength - FIELD_OFFSET(struct sockaddr, sa_data);
     ConnectInfo = RtlAllocateHeap(RtlGetProcessHeap(),
@@ -229,8 +231,8 @@ AfdConnect(
 
 
     ConnectInfo->UseSAN = FALSE;
-    ConnectInfo->Root = 0;
-    ConnectInfo->Unknown = 0;
+    ConnectInfo->RootEndpoint = NULL;
+    ConnectInfo->ConnectEndpoint = NULL;
     ConnectInfo->RemoteAddress.TAAddressCount = 1;
     ConnectInfo->RemoteAddress.Address[0].AddressType = Address->sa_family;
     ConnectInfo->RemoteAddress.Address[0].AddressLength = AddressLength - FIELD_OFFSET(struct sockaddr, sa_data);
