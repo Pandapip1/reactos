@@ -325,8 +325,54 @@ AfdCreateSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     EaInfo = Irp->AssociatedIrp.SystemBuffer;
 
     if( EaInfo ) {
+        /* IoCheckEaBufferValidity() has already verified that EaName is
+         * NUL-terminated at EaNameLength and that EaValueLength bytes really
+         * follow it inside the buffer. Everything below that is up to us:
+         * the contents of the open packet are entirely attacker-controlled,
+         * so validate them before dereferencing anything.
+         *
+         * Note we do not check the EA name. Real AFD does not either: it
+         * parses whatever EA it is handed as an open packet (see AfdCreate()
+         * in the NT sources, which uses only EaNameLength to find the
+         * packet). Adding a name check here would be a divergence, and the
+         * bounds check below is what actually makes this safe. */
+
+        /* The EA value must at least hold the fixed part of the packet, or
+         * the reads of SizeOfTransportName below are themselves out of
+         * bounds. Real AFD reads those fields unchecked; we would rather
+         * not, and this also keeps the subtraction below from wrapping. */
+        if( EaInfo->EaValueLength <
+            FIELD_OFFSET(AFD_CREATE_PACKET, TransportName) ) {
+            AFD_DbgPrint(MIN_TRACE,("EA value too small for an open packet\n"));
+            Irp->IoStatus.Status = STATUS_ACCESS_VIOLATION;
+            IoCompleteRequest( Irp, IO_NO_INCREMENT );
+            return STATUS_ACCESS_VIOLATION;
+        }
+
         ConnectInfo = (PAFD_CREATE_PACKET)(EaInfo->EaName + EaInfo->EaNameLength + 1);
         EaInfoValue = (PWCHAR)(((PCHAR)ConnectInfo) + sizeof(AFD_CREATE_PACKET));
+
+        /* SizeOfTransportName is in bytes and comes straight from the caller.
+         * Without this check the RtlCopyMemory() below reads that many bytes
+         * past the end of the (much smaller) EA buffer.
+         *
+         * Real AFD makes the same check and fails it with
+         * STATUS_ACCESS_VIOLATION, which is also what current Windows
+         * returns for a malformed packet, so use that. It writes the test
+         * as "EaValueLength < sizeof(AFD_OPEN_PACKET) + NameLength"; that
+         * addition can wrap, so phrase it as a subtraction instead, which
+         * the check above has already made safe. */
+        if( ConnectInfo->SizeOfTransportName >
+            EaInfo->EaValueLength -
+            FIELD_OFFSET(AFD_CREATE_PACKET, TransportName) ) {
+            AFD_DbgPrint(MIN_TRACE,("Transport name of %u bytes does not fit "
+                                    "in an EA value of %u bytes\n",
+                                    ConnectInfo->SizeOfTransportName,
+                                    EaInfo->EaValueLength));
+            Irp->IoStatus.Status = STATUS_ACCESS_VIOLATION;
+            IoCompleteRequest( Irp, IO_NO_INCREMENT );
+            return STATUS_ACCESS_VIOLATION;
+        }
 
         //EaLength = sizeof(FILE_FULL_EA_INFORMATION) + EaInfo->EaNameLength + EaInfo->EaValueLength;
 

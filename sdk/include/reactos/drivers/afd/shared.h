@@ -37,8 +37,10 @@ typedef struct _AFD_WSABUF {
  * See AFD_CREATE_PACKET_NT6 in modules/rostests/apitests/afd/AfdHelpers.c,
  * which picks the shape by GetVersion() so that the test can drive both
  * our AFD and a real Windows one, and AFD_OPEN_PACKET in System
- * Informer's phnt (ntafd.h), whose _Field_size_bytes_opt_ annotation
- * confirms the length is in bytes rather than characters.
+ * Informer's phnt (ntafd.h). Both agree the length is in bytes rather
+ * than characters, as does the NT source itself, where AfdCreate()
+ * assigns TransportDeviceNameLength straight into a UNICODE_STRING
+ * Length.
  *
  * afd.sys accepts the NT 5.x shape only. A client that sends the NT 6
  * shape is rejected by AfdCreateSocket(); note that the two cannot be
