@@ -65,7 +65,6 @@ RtlCreateProcessParameters(PRTL_USER_PROCESS_PARAMETERS *ProcessParameters,
    UNICODE_STRING EmptyString = { .Length = 0, .MaximumLength = sizeof(WCHAR), .Buffer = L"" }; ;
    UNICODE_STRING NullString = { .Length = 0, .MaximumLength = 0, .Buffer = NULL }; ;
    HANDLE CurrentDirectoryHandle;
-   HANDLE ConsoleHandle;
    ULONG ConsoleFlags;
 
    DPRINT ("RtlCreateProcessParameters\n");
@@ -81,7 +80,6 @@ RtlCreateProcessParameters(PRTL_USER_PROCESS_PARAMETERS *ProcessParameters,
 	if (CurrentDirectory == NULL)
 	  CurrentDirectory = &NtCurrentPeb()->ProcessParameters->CurrentDirectory.DosPath;
 	CurrentDirectoryHandle = NtCurrentPeb()->ProcessParameters->CurrentDirectory.Handle;
-	ConsoleHandle = NtCurrentPeb()->ProcessParameters->ConsoleHandle;
 	ConsoleFlags = NtCurrentPeb()->ProcessParameters->ConsoleFlags;
      }
    else
@@ -91,7 +89,6 @@ RtlCreateProcessParameters(PRTL_USER_PROCESS_PARAMETERS *ProcessParameters,
 	if (CurrentDirectory == NULL)
 	  CurrentDirectory = &EmptyString;
 	CurrentDirectoryHandle = NULL;
-	ConsoleHandle = NULL;
 	ConsoleFlags = 0;
      }
 
@@ -150,7 +147,7 @@ RtlCreateProcessParameters(PRTL_USER_PROCESS_PARAMETERS *ProcessParameters,
    Param->Environment = NULL;
    Param->EnvironmentSize = 0;
    Param->CurrentDirectory.Handle = CurrentDirectoryHandle;
-   Param->ConsoleHandle = ConsoleHandle;
+   /* Windows leaves ConsoleHandle zeroed here; the caller (kernel32) sets it */
    Param->ConsoleFlags = ConsoleFlags;
 
    Dest = (PWCHAR)(((PBYTE)Param) + sizeof(RTL_USER_PROCESS_PARAMETERS));
