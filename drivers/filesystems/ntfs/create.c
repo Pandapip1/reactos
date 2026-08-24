@@ -426,18 +426,31 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
 
     if (NT_SUCCESS(Status))
     {
-        if (RequestedDisposition == FILE_CREATE)
-        {
-            Irp->IoStatus.Information = FILE_EXISTS;
-            NtfsCloseFile(DeviceExt, FileObject);
-            return STATUS_OBJECT_NAME_COLLISION;
-        }
-
+        /*
+         * The ordering here is asymmetric on purpose, and matches NT.
+         * Measured on Windows 11 Pro 22621, NTFS, FILE_CREATE over an
+         * existing name: FILE_NON_DIRECTORY_FILE against a directory
+         * reports the mismatch first (0xc00000ba, STATUS_FILE_IS_A_DIRECTORY),
+         * but FILE_DIRECTORY_FILE against a plain file reports the collision
+         * (0xc0000035, STATUS_OBJECT_NAME_COLLISION), not STATUS_NOT_A_DIRECTORY.
+         * So the FILE_DIRECTORY_FILE check below must stay under the
+         * disposition check - do not tidy these two checks back together.
+         * Our own fastfat already orders the non-directory case this way, see
+         * drivers/filesystems/fastfat/create.c:1356 versus the FILE_CREATE
+         * collision in FatOpenExistingDcb at drivers/filesystems/fastfat/create.c:3350.
+         */
         if (RequestedOptions & FILE_NON_DIRECTORY_FILE &&
             NtfsFCBIsDirectory(Fcb))
         {
             NtfsCloseFile(DeviceExt, FileObject);
             return STATUS_FILE_IS_A_DIRECTORY;
+        }
+
+        if (RequestedDisposition == FILE_CREATE)
+        {
+            Irp->IoStatus.Information = FILE_EXISTS;
+            NtfsCloseFile(DeviceExt, FileObject);
+            return STATUS_OBJECT_NAME_COLLISION;
         }
 
         if (RequestedOptions & FILE_DIRECTORY_FILE &&
