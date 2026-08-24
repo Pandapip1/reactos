@@ -270,6 +270,21 @@ SetUpHandles(IN PCONSOLE_START_INFO ConsoleStartInfo)
         Parameters->StandardOutput = ConsoleStartInfo->OutputHandle;
         Parameters->StandardError  = ConsoleStartInfo->ErrorHandle;
     }
+    else
+    {
+        /*
+         * The standard handles were explicitly specified by the caller.
+         * Since we acquire a console instead of inheriting one, each handle
+         * that was left unspecified is filled with the corresponding handle
+         * of that console; the ones that were specified are left untouched.
+         */
+        if (Parameters->StandardInput  == NULL)
+            Parameters->StandardInput  = ConsoleStartInfo->InputHandle;
+        if (Parameters->StandardOutput == NULL)
+            Parameters->StandardOutput = ConsoleStartInfo->OutputHandle;
+        if (Parameters->StandardError  == NULL)
+            Parameters->StandardError  = ConsoleStartInfo->ErrorHandle;
+    }
 }
 
 
