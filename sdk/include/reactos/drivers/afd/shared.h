@@ -18,6 +18,33 @@ typedef struct _AFD_WSABUF {
     PCHAR buf;
 } AFD_WSABUF, *PAFD_WSABUF;
 
+/*
+ * The value of the "AfdOpenPacketXX" EA passed to NtCreateFile() on
+ * \Device\Afd. This is the NT 5.x shape, which is the one we implement,
+ * because NT 5.2 is what we target.
+ *
+ * NT 6.0 changed it. Windows Vista and later use a 24-byte packet with
+ * three fields inserted after GroupID, which moves the length field from
+ * +8 to +20 and the name from +12 to +24:
+ *
+ *     DWORD EndpointFlags; DWORD GroupID; DWORD AddressFamily;
+ *     DWORD SocketType;    DWORD Protocol; DWORD SizeOfTransportName;
+ *     WCHAR TransportName[];
+ *
+ * The three new fields exist because Vista introduced socket transport
+ * modes that do not name a TDI device at all; our AFD is TDI-only and
+ * always needs the device name, so there is nothing here for it to do.
+ * See AFD_CREATE_PACKET_NT6 in modules/rostests/apitests/afd/AfdHelpers.c,
+ * which picks the shape by GetVersion() so that the test can drive both
+ * our AFD and a real Windows one, and AFD_OPEN_PACKET in System
+ * Informer's phnt (ntafd.h), whose _Field_size_bytes_opt_ annotation
+ * confirms the length is in bytes rather than characters.
+ *
+ * afd.sys accepts the NT 5.x shape only. A client that sends the NT 6
+ * shape is rejected by AfdCreateSocket(); note that the two cannot be
+ * told apart reliably, since both are variable-length and the field one
+ * reads as a length is name text in the other.
+ */
 typedef struct _AFD_CREATE_PACKET {
     DWORD				EndpointFlags;
     DWORD				GroupID;
