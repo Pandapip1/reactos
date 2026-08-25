@@ -1219,6 +1219,7 @@
 @ stdcall RtlTryEnterCriticalSection(ptr)
 @ stdcall RtlUnhandledExceptionFilter2(ptr long)
 @ stdcall RtlUnhandledExceptionFilter(ptr)
+@ stdcall -version=0x601+ RtlUTF8ToUnicodeN(ptr long ptr str long)
 @ stdcall RtlUnicodeStringToAnsiSize(ptr) RtlxUnicodeStringToAnsiSize
 @ stdcall RtlUnicodeStringToAnsiString(ptr ptr long)
 @ stdcall RtlUnicodeStringToCountedOemString(ptr ptr long)
@@ -1229,6 +1230,7 @@
 @ stdcall RtlUnicodeToMultiByteN(ptr long ptr ptr long)
 @ stdcall RtlUnicodeToMultiByteSize(ptr ptr long)
 @ stdcall RtlUnicodeToOemN(ptr long ptr ptr long)
+@ stdcall -version=0x601+ RtlUnicodeToUTF8N(ptr long ptr wstr long)
 @ stdcall RtlUniform(ptr)
 @ stdcall RtlUnlockBootStatusData(ptr)
 @ stdcall -stub -version=0x600+ RtlUnlockCurrentThread()
