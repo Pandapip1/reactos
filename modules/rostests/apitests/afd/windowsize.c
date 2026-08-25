@@ -37,6 +37,25 @@
  * when 0 < Ulong < 0xFFFF, so ReactOS cannot accept 65536 - real Windows's
  * own default - even on a connected socket.
  *
+ * CORRECTION (measured 2026-08-25): the opening claim above - that these
+ * expectations encode ReactOS's behaviour - is NOT true of all 107. Run on
+ * ReactOS itself (0.4.17-x86-dev, commit 7ee3248, i386, qemu TCG), this test
+ * reports 8 failures, deterministic across repeated runs:
+ *
+ *   windowsize.c:194,197,208,211,322,325,336,339
+ *   "Invalid size: 8193 8192" and "Invalid size: 8191 8192"
+ *
+ * All eight are the same shape: the test sets a window size to Orig+1 or
+ * Orig-1, the set returns STATUS_SUCCESS, and the test then expects the
+ * read-back to still be Orig - i.e. it expects the odd value to be rejected
+ * or rounded. ReactOS stores the value verbatim and hands back 8193 / 8191.
+ *
+ * So the honest statement is narrower than the one above: these expectations
+ * match ReactOS on the *default size* and *unconnected set* questions, and
+ * disagree with it on set/get round-tripping of a non-granular size. Neither
+ * implementation satisfies the whole file. Do not cite this test as "passes
+ * on ReactOS" without qualification.
+ *
  * These expectations are deliberately left as they are. They correctly
  * describe ReactOS, which is this test's primary target, and rewriting them
  * to match Windows would break the test where it is actually run. Nor is
