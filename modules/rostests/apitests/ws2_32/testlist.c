@@ -14,6 +14,7 @@ extern void func_nonblocking(void);
 extern void func_nostartup(void);
 extern void func_open_osfhandle(void);
 extern void func_recv(void);
+extern void func_select(void);
 extern void func_send(void);
 extern void func_WSAAsync(void);
 extern void func_WSAIoctl(void);
@@ -34,6 +35,7 @@ const struct test winetest_testlist[] =
     { "nostartup", func_nostartup },
     { "open_osfhandle", func_open_osfhandle },
     { "recv", func_recv },
+    { "select", func_select },
     { "send", func_send },
     { "WSAAsync", func_WSAAsync },
     { "WSAIoctl", func_WSAIoctl },

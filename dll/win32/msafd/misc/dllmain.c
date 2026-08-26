@@ -1077,6 +1077,40 @@ WSPListen(SOCKET Handle,
 }
 
 
+/*
+ * Append the sockets of an fd_set to the merged handle list held in
+ * PollInfo, skipping any socket that is already present. *HandleCount
+ * is the number of entries currently in the list and is updated. The
+ * caller must have sized PollInfo for the sum of the fd_count values
+ * of every set it merges.
+ */
+static
+VOID
+MsafdMergeFdSet(IN PAFD_POLL_INFO PollInfo,
+                IN OUT PULONG HandleCount,
+                IN const fd_set *Set OPTIONAL)
+{
+    ULONG i, j;
+
+    if (Set == NULL)
+        return;
+
+    for (i = 0; i < Set->fd_count; i++)
+    {
+        for (j = 0; j < *HandleCount; j++)
+        {
+            if (PollInfo->Handles[j].Handle == Set->fd_array[i])
+                break;
+        }
+
+        if (j == *HandleCount)
+        {
+            PollInfo->Handles[j].Handle = Set->fd_array[i];
+            (*HandleCount)++;
+        }
+    }
+}
+
 int
 WSPAPI
 WSPSelect(IN int nfds,
@@ -1098,45 +1132,40 @@ WSPSelect(IN int nfds,
     PSOCKET_INFORMATION Socket;
     SOCKET              Handle;
     ULONG               Events;
-    fd_set              selectfds;
+    ULONG               TotalCount;
 
     /* Find out how many sockets we have, and how large the buffer needs
-     * to be */
-    FD_ZERO(&selectfds);
-    if (readfds != NULL)
-    {
-        for (i = 0; i < readfds->fd_count; i++)
-        {
-            FD_SET(readfds->fd_array[i], &selectfds);
-        }
-    }
-    if (writefds != NULL)
-    {
-        for (i = 0; i < writefds->fd_count; i++)
-        {
-            FD_SET(writefds->fd_array[i], &selectfds);
-        }
-    }
-    if (exceptfds != NULL)
-    {
-        for (i = 0; i < exceptfds->fd_count; i++)
-        {
-            FD_SET(exceptfds->fd_array[i], &selectfds);
-        }
-    }
+     * to be.
+     *
+     * The three fd_sets are merged into a single de-duplicated handle
+     * list (see below).  The size of that list is derived from the
+     * fd_count values of the fd_sets the caller actually passed, and
+     * NOT from FD_SETSIZE: fd_set is caller-allocated, so an
+     * application compiled with a larger FD_SETSIZE may legitimately
+     * hand us more than FD_SETSIZE sockets in a single set, and the
+     * union of three sets can exceed FD_SETSIZE even when no single
+     * set does. */
+    TotalCount = (readfds != NULL ? readfds->fd_count : 0) +
+                 (writefds != NULL ? writefds->fd_count : 0) +
+                 (exceptfds != NULL ? exceptfds->fd_count : 0);
 
-    HandleCount = selectfds.fd_count;
-
-    if ( HandleCount == 0 )
+    if ( TotalCount == 0 )
     {
-        WARN("No handles! Returning SOCKET_ERROR\n", HandleCount);
+        WARN("No handles! Returning SOCKET_ERROR\n");
         if (lpErrno) *lpErrno = WSAEINVAL;
         return SOCKET_ERROR;
     }
 
-    PollBufferSize = sizeof(*PollInfo) + ((HandleCount - 1) * sizeof(AFD_HANDLE));
+    /* Guard the size computation below against integer overflow */
+    if ( TotalCount > (MAXULONG - sizeof(*PollInfo)) / sizeof(AFD_HANDLE) )
+    {
+        if (lpErrno) *lpErrno = WSAENOBUFS;
+        return SOCKET_ERROR;
+    }
 
-    TRACE("HandleCount: %u BufferSize: %u\n", HandleCount, PollBufferSize);
+    PollBufferSize = sizeof(*PollInfo) + ((TotalCount - 1) * sizeof(AFD_HANDLE));
+
+    TRACE("TotalCount: %lu BufferSize: %lu\n", TotalCount, PollBufferSize);
 
     /* Convert Timeout to NT Format */
     if (timeout == NULL)
@@ -1197,10 +1226,13 @@ WSPSelect(IN int nfds,
     PollInfo->Exclusive = FALSE;
     PollInfo->Timeout = Timeout;
 
-    for (i = 0; i < selectfds.fd_count; i++)
-    {
-        PollInfo->Handles[i].Handle = selectfds.fd_array[i];
-    }
+    /* Merge the three fd_sets into one de-duplicated handle list. A
+     * socket present in more than one set occupies a single entry,
+     * whose event flags are OR-ed together by the loops below. */
+    HandleCount = 0;
+    MsafdMergeFdSet(PollInfo, &HandleCount, readfds);
+    MsafdMergeFdSet(PollInfo, &HandleCount, writefds);
+    MsafdMergeFdSet(PollInfo, &HandleCount, exceptfds);
     if (readfds != NULL) {
         for (i = 0; i < readfds->fd_count; i++)
         {
@@ -1276,9 +1308,9 @@ WSPSelect(IN int nfds,
                 if (PollInfo->Handles[j].Handle == exceptfds->fd_array[i])
                     break;
             }
-            if (j > HandleCount)
+            if (j >= HandleCount)
             {
-                ERR("Error while counting exceptfds %ld > %ld\n", j, HandleCount);
+                ERR("Error while counting exceptfds %ld >= %ld\n", j, HandleCount);
                 if (lpErrno) *lpErrno = WSAEFAULT;
                 HeapFree(GlobalHeap, 0, PollBuffer);
                 NtClose(SockEvent);
