@@ -13,6 +13,7 @@ list(APPEND SOURCE
     nostartup.c
     open_osfhandle.c
     recv.c
+    select.c
     send.c
     WSAAsync.c
     WSAIoctl.c
