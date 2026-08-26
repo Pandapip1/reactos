@@ -42,10 +42,21 @@ typedef struct _AFD_WSABUF {
  * assigns TransportDeviceNameLength straight into a UNICODE_STRING
  * Length.
  *
- * afd.sys accepts the NT 5.x shape only. A client that sends the NT 6
- * shape is rejected by AfdCreateSocket(); note that the two cannot be
- * told apart reliably, since both are variable-length and the field one
- * reads as a length is name text in the other.
+ * AfdCreateSocket() reads whatever it is handed as the 12-byte NT 5.x
+ * packet, and cannot tell the two shapes apart from the wire: both are
+ * variable-length, and the field one reads as a length is name text in
+ * the other. A client that sends the NT 6 shape is therefore not
+ * rejected. Its AddressFamily sits where SizeOfTransportName is
+ * expected, so for AF_INET the name length is read as 2 and the two
+ * bytes copied into FCB->TdiDeviceName come from the NT 6 packet's
+ * SocketType field. NtCreateFile() still succeeds and the endpoint is
+ * silently wrong; the failure surfaces later, typically at bind().
+ *
+ * The EA validation in AfdCreateSocket() bounds that copy but cannot
+ * tell that the field it read was never a length: an NT 6 packet
+ * naming \Device\Tcp passes both gates, since its EaValueLength of 48
+ * is >= FIELD_OFFSET(AFD_CREATE_PACKET, TransportName) and its
+ * apparent length of 2 is <= 48 - 12.
  */
 typedef struct _AFD_CREATE_PACKET {
     DWORD				EndpointFlags;
