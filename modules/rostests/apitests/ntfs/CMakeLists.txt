@@ -1,0 +1,5 @@
+
+add_executable(ntfs_allocinfo_test SetAllocationInformation.c)
+set_module_type(ntfs_allocinfo_test win32cui)
+add_importlibs(ntfs_allocinfo_test msvcrt kernel32 ntdll)
+add_rostests_file(TARGET ntfs_allocinfo_test)

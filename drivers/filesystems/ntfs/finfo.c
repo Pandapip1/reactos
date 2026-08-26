@@ -543,6 +543,12 @@ NtfsQueryInformation(PNTFS_IRP_CONTEXT IrpContext)
 * Boolean indicating if the function should operate in case-sensitive mode. This will be TRUE
 * if an application opened the file with the FILE_FLAG_POSIX_SEMANTICS flag.
 *
+* @param TruncateOnly
+* Boolean indicating that the file must never be enlarged. When TRUE, a NewFileSize which is
+* greater than or equal to the current size of the data attribute leaves the file untouched and
+* STATUS_SUCCESS is returned. This is what FileAllocationInformation needs: setting an allocation
+* size can shrink a file, but it must never grow the end-of-file position.
+*
 * @param NewFileSize
 * Pointer to a LARGE_INTEGER which indicates the new end of file (file size).
 *
@@ -565,6 +571,7 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
                  PDEVICE_EXTENSION DeviceExt,
                  ULONG IrpFlags,
                  BOOLEAN CaseSensitive,
+                 BOOLEAN TruncateOnly,
                  PLARGE_INTEGER NewFileSize)
 {
     LARGE_INTEGER CurrentFileSize;
@@ -634,6 +641,19 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
 
     // Get the size of the data attribute
     CurrentFileSize.QuadPart = AttributeDataLength(DataContext->pRecord);
+
+    // Our caller may forbid us from ever growing the file (FileAllocationInformation).
+    // This is checked against the attribute length rather than against the cached
+    // Fcb->RFCB.FileSize, so that a stale cached size can never turn into a file being
+    // extended behind the caller's back.
+    if (TruncateOnly && NewFileSize->QuadPart >= CurrentFileSize.QuadPart)
+    {
+        DPRINT("Leaving file size at %I64u; requested %I64u is not a truncation\n",
+               CurrentFileSize.QuadPart, NewFileSize->QuadPart);
+        ReleaseAttributeContext(DataContext);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return STATUS_SUCCESS;
+    }
 
     // Are we enlarging the attribute?
     if (NewFileSize->QuadPart > CurrentFileSize.QuadPart)
@@ -710,8 +730,11 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
 * STATUS_ACCESS_DENIED if target file is a volume or if paging is involved.
 *
 * @remarks Called by NtfsDispatch() in response to an IRP_MJ_SET_INFORMATION request.
-* Only the FileEndOfFileInformation InformationClass is fully implemented. FileAllocationInformation
-* is a hack and not a true implementation, but it's enough to make SetEndOfFile() work.
+* Only the FileEndOfFileInformation InformationClass is fully implemented.
+* FileAllocationInformation gets the end-of-file half of its contract right -- it rounds the
+* request up to a cluster boundary and truncates only when that lands below the current file
+* size -- but it cannot grow the on-disk allocation beyond the file size, because this driver
+* has no way to hold allocated-but-unused clusters.
 * All other information classes are TODO.
 *
 */
@@ -727,6 +750,9 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
     ULONG BufferLength;
     PIRP Irp;
     PDEVICE_OBJECT DeviceObject;
+    PFILE_ALLOCATION_INFORMATION AllocationInfo;
+    LARGE_INTEGER AllocationSize;
+    ULONG BytesPerCluster;
     NTSTATUS Status = STATUS_NOT_IMPLEMENTED;
 
     DPRINT("NtfsSetInformation(%p)\n", IrpContext);
@@ -752,13 +778,10 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
     {
         PFILE_END_OF_FILE_INFORMATION EndOfFileInfo;
 
-        /* TODO: Allocation size is not actually the same as file end for NTFS,
-           however, few applications are likely to make the distinction.
-
-           Real Windows treats the two classes very differently. Measured on
-           Windows 11 Pro 22621, NTFS with 4096-byte clusters, by querying
-           FILE_STANDARD_INFORMATION before and after the set (identical results
-           under WOW64 and native x86_64):
+        /* Real Windows treats FileAllocationInformation and FileEndOfFileInformation
+           very differently. Measured on Windows 11 Pro 22621, NTFS with 4096-byte
+           clusters, by querying FILE_STANDARD_INFORMATION before and after the set
+           (identical results under WOW64 and native x86_64):
 
              initial EndOfFile | requested allocation | result
              ------------------+----------------------+-------------------------
@@ -772,43 +795,84 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
                          16384 |                 8192 | EndOfFile 16384 -> 8192
                          16384 |                16384 | nothing changes
 
-           The rule: round the requested allocation up to the cluster size; if
-           the rounded value is below EndOfFile, truncate the file to it;
-           otherwise leave the file size alone and only grow the allocation.
-           This matches the documented contract in ntifs.h's Remarks for
-           FILE_ALLOCATION_INFORMATION: "The end-of-file position must always be
-           less than or equal to the allocation size. If the allocation size is
-           set to a value that is less than the end-of-file position, the
-           end-of-file position is automatically adjusted to match the
-           allocation size."
+           The rule: round the requested allocation up to the cluster size; if the
+           rounded value is below EndOfFile, truncate the file to it; otherwise leave
+           the file size alone and only grow the allocation. This matches the
+           documented contract in ntifs.h's Remarks for FILE_ALLOCATION_INFORMATION:
+           "The end-of-file position must always be less than or equal to the
+           allocation size. If the allocation size is set to a value that is less than
+           the end-of-file position, the end-of-file position is automatically adjusted
+           to match the allocation size."
 
-           The fall-through below diverges in both directions. With EndOfFile 0
-           and a request of 4096, Windows leaves EndOfFile at 0 while we set it
-           to 4096. Worse, with EndOfFile 4096 and a request of 100, Windows
-           changes nothing (100 rounds up to a single cluster, which the file
-           already occupies) while we truncate to 100 and destroy 4 KB that
-           Windows preserves. With EndOfFile 16384 and a request of 100, Windows
-           truncates to 4096 and we truncate to 100.
+           This case used to fall through to FileEndOfFileInformation, which diverged
+           in both directions. With EndOfFile 0 and a request of 4096 we set EndOfFile
+           to 4096 where Windows leaves it at 0. Worse, with EndOfFile 4096 and a
+           request of 100 we truncated to 100 and destroyed 3996 bytes that Windows
+           preserves, because 100 rounds up to a single cluster which the file already
+           occupies.
 
-           Note for anyone writing a test: the EndOfFile 4096 / request 100 row
-           is the discriminating case. On its own it looks like "small requests
-           are ignored", which is a clean, plausible and wrong rule; only the
-           16384 rows expose the cluster rounding. A test built solely around
-           the 4096 case passes against a wrong implementation, and here it
-           would mask a data-destroying one.
+           What is implemented below is the EndOfFile half of the rule, which is the
+           half that decides whether user data survives: round up, and truncate only on
+           a genuine shrink. Every row of the table above now matches on EndOfFile.
 
-           fastfat already has the correct shape: see FatSetAllocationInfo() in
-           drivers/filesystems/fastfat/fileinfo.c, which grows the allocation
-           when the request exceeds it and lowers FileSize only when the new
-           allocation falls below it.
+           What is NOT implemented is the AllocationSize half: the first two rows grow
+           AllocationSize past EndOfFile on Windows, and we leave both alone. Doing that
+           would mean holding clusters that are allocated but not covered by the data
+           attribute's length, which this driver has no representation for -- it derives
+           Fcb->RFCB.AllocationSize straight from the attribute record (see mft.c). And
+           reserving space is only a hint, so declining it is a completeness gap, while
+           truncating a file the caller merely asked to reserve space for is data loss.
+           fastfat, which does track the two separately, has the full shape: see
+           FatSetAllocationInfo() in drivers/filesystems/fastfat/fileinfo.c.
 
-           This is left as-is deliberately. Doing it properly needs cluster-size
-           rounding plus a conditional truncate, which in turn needs this driver
-           to track allocation size separately from file size -- something it
-           does not do at all today. That is a structural change to the NTFS
-           write path, not a local fix. */
+           Note for anyone extending the test: the EndOfFile 4096 / request 100 row is
+           the discriminating case. On its own it looks like "small requests are
+           ignored", which is a clean, plausible and wrong rule; only the 16384 rows
+           expose the cluster rounding, and a cluster-aligned request behaves the same
+           either way. See modules/rostests/apitests/ntfs/. */
         case FileAllocationInformation:
-            DPRINT1("FIXME: Using hacky method of setting FileAllocationInformation.\n");
+            AllocationInfo = (PFILE_ALLOCATION_INFORMATION)SystemBuffer;
+            BytesPerCluster = DeviceExt->NtfsInfo.BytesPerCluster;
+
+            if (BufferLength < sizeof(FILE_ALLOCATION_INFORMATION) ||
+                AllocationInfo->AllocationSize.QuadPart < 0 ||
+                BytesPerCluster == 0)
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            /* NTFS cluster sizes are always powers of two, so this is a mask-and-add
+               and needs no 64-bit division helper */
+            AllocationSize.QuadPart = ALIGN_UP_BY((ULONGLONG)AllocationInfo->AllocationSize.QuadPart,
+                                                  (ULONGLONG)BytesPerCluster);
+
+            DPRINT("Setting allocation size: requested %I64u, rounded %I64u, file size %I64u\n",
+                   AllocationInfo->AllocationSize.QuadPart,
+                   AllocationSize.QuadPart,
+                   Fcb->RFCB.FileSize.QuadPart);
+
+            if (AllocationSize.QuadPart >= Fcb->RFCB.FileSize.QuadPart)
+            {
+                /* Not a shrink. Windows would grow the allocation here and leave the
+                   file size alone; we cannot hold an allocation of our own, so we leave
+                   both alone. What we must not do is extend the file. */
+                Status = STATUS_SUCCESS;
+                break;
+            }
+
+            /* A genuine shrink: truncate to the cluster-rounded allocation. TruncateOnly
+               is passed as well, so that a stale cached file size cannot turn this into
+               a grow once the real attribute length is known. */
+            Status = NtfsSetEndOfFile(Fcb,
+                                      FileObject,
+                                      DeviceExt,
+                                      Irp->Flags,
+                                      BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
+                                      TRUE,
+                                      &AllocationSize);
+            break;
+
         case FileEndOfFileInformation:
             EndOfFileInfo = (PFILE_END_OF_FILE_INFORMATION)SystemBuffer;
             Status = NtfsSetEndOfFile(Fcb,
@@ -816,6 +880,7 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
                                       DeviceExt,
                                       Irp->Flags,
                                       BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
+                                      FALSE,
                                       &EndOfFileInfo->EndOfFile);
             break;
 

@@ -1008,6 +1008,7 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
                  PDEVICE_EXTENSION DeviceExt,
                  ULONG IrpFlags,
                  BOOLEAN CaseSensitive,
+                 BOOLEAN TruncateOnly,
                  PLARGE_INTEGER NewFileSize);
 
 NTSTATUS
